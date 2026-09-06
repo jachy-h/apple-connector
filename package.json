@@ -1,0 +1,44 @@
+{
+  "name": "apple-connector",
+  "version": "0.1.0-dev.0",
+  "private": true,
+  "type": "module",
+  "description": "Scoped local Apple data access for agents",
+  "engines": {
+    "node": ">=24.20.0 <25 || >=26.8.1 <27"
+  },
+  "bin": {
+    "apple-connector": "dist/src/cli/index.js"
+  },
+  "scripts": {
+    "build": "npm run build:web && tsc -p tsconfig.json && rm -rf dist/web && cp -R web/dist dist/web",
+    "build:web": "vite build --config vite.config.ts",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "check:jxa": "node scripts/check-jxa.mjs",
+    "probe": "npm run build && node dist/src/cli/index.js doctor --probe",
+    "test:native": "npm run build && node --test dist/tests/native/*.test.js",
+    "check": "npm run test && npm run check:jxa",
+    "release:verify": "node scripts/release-verify.mjs"
+  },
+  "files": [
+    "dist/",
+    "scripts/jxa/",
+    "README.md",
+    "README_zh.md",
+    "docs/native-validation.md"
+  ],
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "7.0.2",
+    "vite": "^7.3.5"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "4.5.4"
+  }
+}
