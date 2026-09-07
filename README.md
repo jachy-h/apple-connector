@@ -29,8 +29,8 @@ The service, client management and MCP entry are implemented and testable withou
 
 ```sh
 export APPLE_CONNECTOR_STATE_DIR=/tmp/connector-dev   # optional; default is ~/Library/Application Support/AppleConnector
-npm run start                                          # builds, initializes as needed, starts service, and opens management on macOS
-node dist/src/cli/index.js start                       # lower-level equivalent without opening a browser
+npm run start                                          # rebuilds, replaces any old service, and stays in this terminal
+node dist/src/cli/index.js start                       # background mode: start or reuse an existing service
 node dist/src/cli/index.js open --print                # prints a newly issued one-time URL without launching a browser
 node dist/src/cli/index.js status
 node dist/src/cli/index.js client create --name "Agent" \
@@ -43,8 +43,8 @@ Notes:
 
 - `expiresAt` is Unix epoch **milliseconds** (the `Date.now()` scale).
 - The admin session token is printed once by first-time initialization; management commands read it from the state directory on the same machine. Keep it out of agent environments.
-- `start` is idempotent: a second invocation reuses the running service and issues a fresh one-time browser link. `open` can likewise reissue a link without restarting or invalidating established sessions.
-- `npm run start` is the recommended development entrypoint. It rebuilds the management UI and service before running `start --open`.
+- `npm run start` is the recommended development entrypoint. It rebuilds everything, replaces any running instance, and runs the new service in the current terminal; press Ctrl-C to stop it.
+- The lower-level `start` command remains idempotent background mode: a second invocation reuses a same-version service and issues a fresh one-time browser link. `open` can likewise reissue a link without restarting or invalidating established sessions.
 - The service listens on a Unix domain socket inside the 0700 state directory; agent and management RPC methods are separated by credential class.
 - The management site binds a random `127.0.0.1` port only. Its one-time bootstrap link is exchanged for an HttpOnly, SameSite session and protected by Host, Origin and CSRF checks. `open` never places the persistent administrator token in a URL.
 - Client access can be created and, for one-grant clients, edited as a form from the management site; credentials can be rotated from the management site or CLI. Policy edits cancel unexecuted plans; rotation invalidates the old token immediately.

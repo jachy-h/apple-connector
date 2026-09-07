@@ -29,8 +29,8 @@ node dist/src/cli/index.js doctor --reminders-m1 <专用清单-id>
 
 ```sh
 export APPLE_CONNECTOR_STATE_DIR=/tmp/connector-dev   # 可选；默认 ~/Library/Application Support/AppleConnector
-npm run start                                          # 构建、必要时初始化、启动服务，并在 macOS 打开管理页
-node dist/src/cli/index.js start                       # 不打开浏览器的底层等价命令
+npm run start                                          # 重新构建、替换旧服务，并留在当前终端运行
+node dist/src/cli/index.js start                       # 后台模式：启动或复用已有服务
 node dist/src/cli/index.js open --print                # 不启动浏览器，仅输出新签发的一次性 URL
 node dist/src/cli/index.js status
 node dist/src/cli/index.js client create --name "Agent" \
@@ -43,8 +43,8 @@ node dist/src/cli/index.js stop
 
 - `expiresAt` 为 Unix 纪元**毫秒**（与 `Date.now()` 同尺度）。
 - 管理会话 token 仅在首次初始化时显示一次；管理类命令在本机从状态目录读取。请勿放入 agent 环境。
-- `start` 可重复调用：再次运行会复用既有服务并签发新的浏览器链接。`open` 也可不重启服务重新签发链接，且不会使已有会话失效。
-- 开发时推荐使用 `npm run start`：它会先重新构建网页和服务，再执行 `start --open`。
+- 开发时推荐使用 `npm run start`：它会重新构建全部内容、停止任何已有实例，并在当前终端运行全新的服务；按 Ctrl-C 即正常停止。
+- 底层 `start` 命令保留幂等后台模式：再次运行会复用同版本服务并签发新的浏览器链接。`open` 也可不重启服务重新签发链接，且不会使已有会话失效。
 - 服务监听状态目录（0700）内的 Unix domain socket；agent 与管理类 RPC 方法按凭证类别隔离。
 - 管理网页只绑定随机 `127.0.0.1` 端口。一次性 bootstrap 链接会换取 `HttpOnly`、`SameSite` 会话，并受 Host、Origin 与 CSRF 校验保护；`open` 不会把持久管理员 token 放入 URL。
 - 可从管理网页以表单创建或编辑单授权客户端范围，并可在网页或 CLI 轮换凭证。策略编辑会取消尚未执行的计划，轮换会立即使旧 token 失效。

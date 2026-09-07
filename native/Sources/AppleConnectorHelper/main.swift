@@ -37,7 +37,7 @@ final class Helper {
   private func requestAccess(_ entity: EKEntityType) throws { let sem = DispatchSemaphore(value: 0); let result = AccessResult(); let completion: @Sendable (Bool, Error?) -> Void = { granted, error in result.set(error.map(Result.failure) ?? .success(granted)); sem.signal() }; if entity == .event { store.requestFullAccessToEvents(completion: completion) } else { store.requestFullAccessToReminders(completion: completion) }; guard sem.wait(timeout: .now() + 60) == .success else { throw Failure.unavailable("Authorization request timed out.") }; guard try result.get().get() else { throw Failure.denied("Full EventKit access was not granted.") } }
   func run(_ request: Request) throws -> JSONValue {
     switch request.action {
-    case "hello": return .object(["helperVersion": .string("0.5.0"), "protocolVersion": .number(Double(protocolVersion)), "actions": .array(["permissions.status", "permissions.request", "calendar.listCalendars", "calendar.listEvents", "reminders.listLists", "reminders.list", "reminders.preflight", "reminders.createVerified", "diagnostics.remindersABDelete"].map(JSONValue.string))])
+    case "hello": return .object(["helperVersion": .string("0.6.2"), "protocolVersion": .number(Double(protocolVersion)), "actions": .array(["permissions.status", "permissions.request", "calendar.listCalendars", "calendar.listEvents", "reminders.listLists", "reminders.list", "reminders.preflight", "reminders.createVerified", "reminders.updateVerified", "reminders.deleteVerified", "diagnostics.remindersABDelete"].map(JSONValue.string))])
     case "permissions.status": return .object(["calendar": access(.event), "reminders": access(.reminder)])
     case "permissions.request": let provider = try text(request.payload, "provider"); guard provider == "calendar" || provider == "reminders" else { throw Failure.invalid("Unsupported permission provider.") }; try requestAccess(provider == "calendar" ? EKEntityType.event : EKEntityType.reminder); return .object(["calendar": access(.event), "reminders": access(.reminder)])
     case "calendar.listCalendars":
@@ -94,6 +94,40 @@ final class Helper {
           "totalMs": .number(verifiedAt.timeIntervalSince(actionStarted) * 1000)
         ])
       ])
+    case "reminders.updateVerified":
+      try require(.reminder)
+      guard let rawChange = request.payload["change"], case .object(let change) = rawChange else { throw Failure.invalid("Invalid reminder change.") }
+      let listId = try text(change, "containerId")
+      let nativeId = try text(change, "id")
+      let c = try calendar(listId, entity: .reminder)
+      guard c.allowsContentModifications else { throw Failure.denied("The requested Reminders list is not writable.") }
+      guard let reminder = store.calendarItem(withIdentifier: nativeId) as? EKReminder,
+            reminder.calendar.calendarIdentifier == listId else { throw Failure.invalid("The requested reminder is unavailable in this list.") }
+      guard reminder.recurrenceRules?.isEmpty != false else { throw Failure.invalid("Recurring reminders cannot be edited.") }
+      reminder.title = try text(change, "title", 500)
+      reminder.notes = change["body"]?.string ?? ""
+      guard case .bool(let completed) = change["completed"] else { throw Failure.invalid("Invalid completed.") }
+      reminder.isCompleted = completed
+      try store.save(reminder, commit: true)
+      guard let saved = store.calendarItem(withIdentifier: nativeId) as? EKReminder,
+            saved.calendar.calendarIdentifier == listId,
+            saved.title == reminder.title,
+            saved.notes == reminder.notes,
+            saved.isCompleted == reminder.isCompleted else { throw Failure.unknown("Reminder could not be verified after updating.") }
+      return .object(["id": .string(nativeId), "containerId": .string(listId)])
+    case "reminders.deleteVerified":
+      try require(.reminder)
+      guard let rawChange = request.payload["change"], case .object(let change) = rawChange else { throw Failure.invalid("Invalid reminder change.") }
+      let listId = try text(change, "containerId")
+      let nativeId = try text(change, "id")
+      let c = try calendar(listId, entity: .reminder)
+      guard c.allowsContentModifications else { throw Failure.denied("The requested Reminders list is not writable.") }
+      guard let reminder = store.calendarItem(withIdentifier: nativeId) as? EKReminder,
+            reminder.calendar.calendarIdentifier == listId else { throw Failure.invalid("The requested reminder is unavailable in this list.") }
+      guard reminder.recurrenceRules?.isEmpty != false else { throw Failure.invalid("Recurring reminders cannot be deleted.") }
+      try store.remove(reminder, commit: true)
+      guard store.calendarItem(withIdentifier: nativeId) == nil else { throw Failure.unknown("Reminder deletion could not be verified.") }
+      return .object(["id": .string(nativeId), "containerId": .string(listId)])
     case "diagnostics.remindersABDelete":
       try require(.reminder)
       let listId = try text(request.payload, "containerId")

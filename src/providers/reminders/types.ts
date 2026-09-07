@@ -20,6 +20,21 @@ export const createReminderSchema = z.object({
   due: dueSchema.optional(),
 }).strict();
 export type CreateReminder = z.infer<typeof createReminderSchema>;
+export const updateReminderSchema = z.object({
+  kind: z.literal('reminders.update'),
+  containerId: z.string().min(1).max(512),
+  id: z.string().min(1).max(512),
+  title: z.string().trim().min(1).max(500),
+  body: z.string().max(32_000).default(''),
+  completed: z.boolean(),
+}).strict();
+export type UpdateReminder = z.infer<typeof updateReminderSchema>;
+export const deleteReminderSchema = z.object({
+  kind: z.literal('reminders.delete'),
+  containerId: z.string().min(1).max(512),
+  id: z.string().min(1).max(512),
+}).strict();
+export type DeleteReminder = z.infer<typeof deleteReminderSchema>;
 export const reminderReceiptSchema = z.object({ id: z.string().min(1).max(512), containerId: z.string().min(1).max(512) }).strict();
 export type ReminderReceipt = z.infer<typeof reminderReceiptSchema>;
 

@@ -87,8 +87,14 @@ export async function startService(): Promise<StartResult> {
   setup();
   const existing = status();
   if (existing.running && existing.pid !== null) {
-    const url = await issueManagementUrl();
-    return { started: false, pid: existing.pid, url };
+    try {
+      const info = await new HttpServiceClient(paths.socket).request('management.service_info', {}, readAdminToken(paths)) as { version?: unknown };
+      if (info.version === appVersion) {
+        const url = await issueManagementUrl();
+        return { started: false, pid: existing.pid, url };
+      }
+    } catch { /* An incompatible running service must be replaced by this build. */ }
+    await stopService();
   }
   const entry = fileURLToPath(new URL('./main.js', import.meta.url));
   const child = spawn(process.execPath, [entry], { detached: true, stdio: 'ignore' });
@@ -107,6 +113,19 @@ export async function startService(): Promise<StartResult> {
   let tail = '';
   try { tail = readFileSync(paths.logFile, 'utf8').split('\n').slice(-8).join('\n'); } catch { /* No log yet. */ }
   throw new ConnectorError('service_unavailable', `Service did not become ready.\n${tail}`.trim());
+}
+
+/** Replace any existing instance and run the service in this terminal process. */
+export async function startForegroundService(): Promise<StartResult> {
+  setup();
+  const existing = status();
+  if (existing.running) await stopService();
+  // main owns the listeners and SIGINT/SIGTERM shutdown path. Dynamic import keeps the
+  // development CLI itself as the service process instead of spawning or detaching a child.
+  await import('./main.js');
+  const current = status();
+  if (!current.running || current.pid !== process.pid) throw new ConnectorError('service_unavailable', 'Foreground service did not become ready in the current process.');
+  return { started: true, pid: process.pid, url: await issueManagementUrl() };
 }
 
 /** Stop the background service and wait for its socket to disappear. */

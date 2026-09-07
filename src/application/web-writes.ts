@@ -1,7 +1,8 @@
 import { ConnectorError } from './errors.js';
 import { Store, digest } from '../storage/database.js';
-import { createReminderSchema, reminderReceiptSchema } from '../providers/reminders/types.js';
-import type { ReminderWriter } from '../providers/reminders/types.js';
+import { createReminderSchema, deleteReminderSchema, reminderReceiptSchema, updateReminderSchema } from '../providers/reminders/types.js';
+import type { ReminderWriter, UpdateReminder, DeleteReminder } from '../providers/reminders/types.js';
+import type { WebReminderMutator } from '../providers/reminders/eventkit.js';
 
 type Provider = 'reminders';
 type Row = { id: string; provider: Provider; request_hash: string; state: string; result: string | null };
@@ -15,12 +16,22 @@ export class WebWrites {
   private readonly now: () => number;
   // The third parameter is retained only to keep existing callers source-compatible; Notes
   // mutations are intentionally ignored in v0.5.0.
-  constructor(private readonly store: Store, private readonly reminders: ReminderWriter, ignored?: unknown, now: () => number = Date.now) {
+  constructor(private readonly store: Store, private readonly reminders: ReminderWriter & Partial<WebReminderMutator>, ignored?: unknown, now: () => number = Date.now) {
     this.now = typeof ignored === 'function' ? ignored as () => number : now;
     store.db.prepare("UPDATE web_operations SET state='outcome_unknown',payload=NULL WHERE state='executing'").run();
   }
 
   submitReminders(key: string, raw: unknown) { return this.queue(() => this.submit('reminders', key, createReminderSchema.parse(raw), this.reminders, reminderReceiptSchema)); }
+  submitReminderUpdate(key: string, raw: unknown) {
+    const change = updateReminderSchema.parse(raw);
+    if (!this.reminders.update) throw new ConnectorError('service_unavailable', 'Reminder editing is not configured.');
+    return this.queue(() => this.submitMutation<UpdateReminder>('update', key, change, (input) => this.reminders.update!(input)));
+  }
+  submitReminderDelete(key: string, raw: unknown) {
+    const change = deleteReminderSchema.parse(raw);
+    if (!this.reminders.remove) throw new ConnectorError('service_unavailable', 'Reminder deletion is not configured.');
+    return this.queue(() => this.submitMutation<DeleteReminder>('delete', key, change, (input) => this.reminders.remove!(input)));
+  }
   get(id: string) { return this.result(this.row(id)); }
 
   private queue<T>(work: () => Promise<T>): Promise<T> { const next = this.tail.then(work); this.tail = next.catch(() => undefined); return next; }
@@ -62,5 +73,34 @@ export class WebWrites {
       this.store.audit({ at: this.now(), source: 'web', operationId: id, provider, action: 'create', outcome: 'outcome_unknown', count: 1, target: change.containerId, durationMs: this.now() - startedAt, errorCode: 'outcome_unknown' });
     }
     return this.get(id);
+  }
+  private async submitMutation<T extends UpdateReminder | DeleteReminder>(action: 'update' | 'delete', key: string, change: T, execute: (input: T) => Promise<unknown>) {
+    const startedAt = this.now(); const keyHash = digest(key); const requestHash = digest(JSON.stringify(change));
+    const existing = this.store.db.prepare('SELECT id,provider,request_hash,state,result FROM web_operations WHERE key_hash=?').get(keyHash) as Row | undefined;
+    if (existing) {
+      if (existing.provider !== 'reminders' || existing.request_hash !== requestHash) throw new ConnectorError('conflict', 'Idempotency key was used for different content.');
+      return this.result(existing);
+    }
+    try { this.store.db.prepare('INSERT INTO web_operations(id,provider,key_hash,request_hash,state,payload,created_at) VALUES(?,?,?,?,?,?,?)').run(key, 'reminders', keyHash, requestHash, 'executing', JSON.stringify(change), this.now()); }
+    catch {
+      const raced = this.store.db.prepare('SELECT id,provider,request_hash,state,result FROM web_operations WHERE key_hash=?').get(keyHash) as Row | undefined;
+      if (!raced || raced.provider !== 'reminders' || raced.request_hash !== requestHash) throw new ConnectorError('conflict', 'Idempotency key was used for different content.');
+      return this.result(raced);
+    }
+    try {
+      const receipt = reminderReceiptSchema.parse(await execute(change));
+      if (receipt.containerId !== change.containerId || receipt.id !== change.id) throw new ConnectorError('outcome_unknown', 'Write could not be verified.');
+      this.store.db.prepare("UPDATE web_operations SET state='succeeded',payload=NULL,result=? WHERE id=?").run(JSON.stringify(receipt), key);
+      this.store.audit({ at: this.now(), source: 'web', operationId: key, provider: 'reminders', action, outcome: 'succeeded', count: 1, target: change.containerId, durationMs: this.now() - startedAt });
+    } catch (error) {
+      if (error instanceof ConnectorError && (error.code === 'invalid_request' || error.code === 'permission_denied')) {
+        this.store.db.prepare("UPDATE web_operations SET state='failed',payload=NULL WHERE id=?").run(key);
+        this.store.audit({ at: this.now(), source: 'web', operationId: key, provider: 'reminders', action, outcome: 'failed', count: 0, target: change.containerId, durationMs: this.now() - startedAt, errorCode: error.code });
+        throw error;
+      }
+      this.store.db.prepare("UPDATE web_operations SET state='outcome_unknown',payload=NULL WHERE id=?").run(key);
+      this.store.audit({ at: this.now(), source: 'web', operationId: key, provider: 'reminders', action, outcome: 'outcome_unknown', count: 1, target: change.containerId, durationMs: this.now() - startedAt, errorCode: 'outcome_unknown' });
+    }
+    return this.get(key);
   }
 }

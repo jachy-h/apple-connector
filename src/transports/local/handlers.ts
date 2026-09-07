@@ -343,11 +343,22 @@ export class ServiceFacade {
           const parsed = webWriteSchema.parse(params);
           return rpcOk(await this.webWrites.submitReminders(parsed.idempotencyKey, parsed.change));
         }
+        case 'web.reminders.update': {
+          if (!this.webWrites) throw new ConnectorError('service_unavailable', 'Web writes are not configured.');
+          const parsed = webWriteSchema.parse(params);
+          return rpcOk(await this.webWrites.submitReminderUpdate(parsed.idempotencyKey, parsed.change));
+        }
+        case 'web.reminders.delete': {
+          if (!this.webWrites) throw new ConnectorError('service_unavailable', 'Web writes are not configured.');
+          const parsed = webWriteSchema.parse(params);
+          return rpcOk(await this.webWrites.submitReminderDelete(parsed.idempotencyKey, parsed.change));
+        }
         case 'web.operations.get': {
           if (!this.webWrites) throw new ConnectorError('service_unavailable', 'Web writes are not configured.');
           const { id } = operationRefParamsSchema.parse(params);
           return rpcOk(this.webWrites.get(id));
         }
+        case 'management.service_info': return rpcOk({ version: this.version });
         case 'management.issue_link': {
           if (!this.issueManagementLink) throw new ConnectorError('service_unavailable', 'Management site is not configured.');
           return rpcOk({ url: this.issueManagementLink() });

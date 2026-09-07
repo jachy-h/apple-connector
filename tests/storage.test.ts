@@ -8,6 +8,7 @@ import { ReminderOperations } from '../src/operations/reminders.js';
 import { WebWrites } from '../src/application/web-writes.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
 import { DatabaseSync } from 'node:sqlite';
+import { ConnectorError } from '../src/application/errors.js';
 
 test('disk database reopens with credentials and private filesystem permissions', () => {
   const root = mkdtempSync(join(tmpdir(), 'apple-connector-db-'));
@@ -92,6 +93,59 @@ test('web writes are idempotent, isolated from clients, and retain no content af
     const audit = store.queryAudit({ source: 'web' });
     assert.equal(audit.total, 1); assert.ok(audit.items.every((event) => !event.clientId)); assert.ok((audit.items[0]?.durationMs ?? -1) >= 0);
     assert.throws(() => web.get('unknown'), { code: 'permission_denied' });
+  } finally { store.close(); }
+});
+
+test('web reminder edits and deletions are idempotent and clear their payloads', async () => {
+  const store = new Store(':memory:'); let updates = 0; let deletes = 0;
+  const reminders = {
+    preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true,
+    update: async (change: { id: string; containerId: string }) => { updates++; return { id: change.id, containerId: change.containerId }; },
+    remove: async (change: { id: string; containerId: string }) => { deletes++; return { id: change.id, containerId: change.containerId }; },
+  };
+  try {
+    const web = new WebWrites(store, reminders);
+    const update = { kind: 'reminders.update', containerId: 'test-list', id: 'r-1', title: 'PRIVATE TITLE', body: 'PRIVATE BODY', completed: true };
+    const deletion = { kind: 'reminders.delete', containerId: 'test-list', id: 'r-1' };
+    const [one, two] = await Promise.all([web.submitReminderUpdate('update-key', update), web.submitReminderUpdate('update-key', update)]);
+    assert.equal(updates, 1); assert.equal(one.state, 'succeeded'); assert.deepEqual(one, two);
+    await web.submitReminderDelete('delete-key', deletion);
+    assert.equal(deletes, 1);
+    assert.ok(!JSON.stringify(store.db.prepare('SELECT * FROM web_operations').all()).includes('PRIVATE'));
+    assert.deepEqual(store.queryAudit({ source: 'web' }).items.map((item) => item.action).sort(), ['delete', 'update']);
+  } finally { store.close(); }
+});
+
+test('definite Web reminder mutation failures remain visible and are not reported as unknown', async () => {
+  const store = new Store(':memory:');
+  const reminders = {
+    preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true,
+    update: async () => { throw new ConnectorError('invalid_request', 'Reminder cannot be edited.'); },
+  };
+  try {
+    const web = new WebWrites(store, reminders);
+    const input = { kind: 'reminders.update', containerId: 'test-list', id: 'r-1', title: 'PRIVATE', body: '', completed: true };
+    await assert.rejects(web.submitReminderUpdate('failed-update-key', input), { code: 'invalid_request' });
+    assert.equal(web.get('failed-update-key').state, 'failed');
+    assert.equal(store.db.prepare('SELECT payload FROM web_operations WHERE id=?').get('failed-update-key')?.payload, null);
+    assert.equal(store.queryAudit({ source: 'web' }).items[0]?.outcome, 'failed');
+  } finally { store.close(); }
+});
+
+test('management routes reminder update and delete requests to Web writes', async () => {
+  const store = new Store(':memory:'); let updates = 0; let deletes = 0;
+  const reminders = {
+    preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true,
+    update: async (change: { id: string; containerId: string }) => { updates++; return { id: change.id, containerId: change.containerId }; },
+    remove: async (change: { id: string; containerId: string }) => { deletes++; return { id: change.id, containerId: change.containerId }; },
+  };
+  try {
+    const operations = new ReminderOperations(store, reminders);
+    const web = new WebWrites(store, reminders);
+    const facade = new ServiceFacade(store, operations, 'admin', 'test', undefined, undefined, undefined, undefined, undefined, undefined, web);
+    const update = await facade.management('web.reminders.update', { idempotencyKey: '7632737c-ea5e-45bd-a8aa-a0179f84b950', change: { kind: 'reminders.update', containerId: 'test-list', id: 'r-1', title: 'Updated', body: '', completed: true } });
+    const deletion = await facade.management('web.reminders.delete', { idempotencyKey: '0098919d-17e7-482d-b2f4-0bb79c3a5771', change: { kind: 'reminders.delete', containerId: 'test-list', id: 'r-1' } });
+    assert.equal(update.ok, true); assert.equal(deletion.ok, true); assert.equal(updates, 1); assert.equal(deletes, 1);
   } finally { store.close(); }
 });
 

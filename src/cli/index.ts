@@ -4,7 +4,7 @@ import { capabilities } from '../application/capabilities.js';
 import { publicError } from '../application/errors.js';
 import { JxaRunner } from '../jxa/runner.js';
 import { HttpServiceClient } from '../transports/local/client.js';
-import { health, issueManagementUrl, setup, startService, status, stopService } from '../transports/local/lifecycle.js';
+import { health, issueManagementUrl, setup, startForegroundService, startService, status, stopService } from '../transports/local/lifecycle.js';
 import { spawn } from 'node:child_process';
 import { readAdminToken, statePaths } from '../transports/local/paths.js';
 import { runMcpEntry } from '../transports/mcp/index.js';
@@ -47,7 +47,8 @@ try {
 Usage: apple-connector <command>
 
   setup                Create the state directory, admin session and database
-  start                Start the local background service
+  start                Start or reuse the local background service
+  start --foreground   Replace any running service and stay attached to this terminal
   stop                 Stop the local background service
   status               Show service, database and client summary
   client list          List paired clients
@@ -96,10 +97,15 @@ ${opened ? 'The one-time local management session was opened in your browser.' :
     }
 
     case 'start':
-      if (args.length && !(args.length === 1 && args[0] === '--open')) throw new Error('Unexpected arguments');
-      const started = await startService();
-      const opened = args[0] === '--open' ? openManagement(started.url) : false;
-      console.log(`apple-connector service ${started.started ? 'started' : 'already running'} (pid ${started.pid}).\nManagement URL: ${started.url}${args[0] === '--open' && !opened ? '\nBrowser could not be opened; copy the URL above.' : ''}`);
+      if (args.length && !(args.length === 1 && (args[0] === '--open' || args[0] === '--foreground'))) throw new Error('Unexpected arguments');
+      if (args[0] === '--foreground') {
+        const foreground = await startForegroundService();
+        console.log(`apple-connector service running in foreground (pid ${foreground.pid}).\nManagement URL: ${foreground.url}\nPress Ctrl-C to stop.`);
+      } else {
+        const started = await startService();
+        const opened = args[0] === '--open' ? openManagement(started.url) : false;
+        console.log(`apple-connector service ${started.started ? 'started' : 'already running'} (pid ${started.pid}).\nManagement URL: ${started.url}${args[0] === '--open' && !opened ? '\nBrowser could not be opened; copy the URL above.' : ''}`);
+      }
       break;
 
     case 'stop':
