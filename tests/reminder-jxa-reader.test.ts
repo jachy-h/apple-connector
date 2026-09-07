@@ -17,7 +17,7 @@ test('Reminders reader passes explicit list scopes and validates pagination', as
   assert.deepEqual(await reader.list('list', 2, 3), { items: [{ id: 'r', listId: 'list', title: 'Title', body: 'Body', completed: false, due: null }], nextOffset: null });
   assert.deepEqual(calls, [
     JSON.stringify({ operation: 'reminders.listLists', payload: { containerIds: ['list'] } }),
-    JSON.stringify({ operation: 'reminders.list', payload: { listId: 'list', offset: 2, limit: 3 } }),
+    JSON.stringify({ operation: 'reminders.listEventKit', payload: { listId: 'list', offset: 2, limit: 3 } }),
   ]);
 });
 

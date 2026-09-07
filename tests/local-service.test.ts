@@ -8,6 +8,7 @@ import { Store } from '../src/storage/database.js';
 import { ReminderOperations } from '../src/operations/reminders.js';
 import { HttpServiceClient } from '../src/transports/local/client.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
+import type { ManagementDiagnostics } from '../src/transports/local/handlers.js';
 import { LocalServer, m0GateWriter } from '../src/transports/local/service.js';
 import { loadOrCreateAdminToken } from '../src/transports/local/paths.js';
 import type { StatePaths } from '../src/transports/local/paths.js';
@@ -21,7 +22,7 @@ interface Fixture {
   agent: (token: string, method: RpcMethod, params?: Record<string, unknown>) => Promise<unknown>;
 }
 
-async function fixture(options: { writer?: ReminderWriter } = {}): Promise<Fixture> {
+async function fixture(options: { writer?: ReminderWriter; diagnostics?: ManagementDiagnostics } = {}): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), 'apple-connector-test-'));
   const paths: StatePaths = {
     dir, db: join(dir, 'db.sqlite3'), adminTokenFile: join(dir, 'admin-token'),
@@ -30,7 +31,7 @@ async function fixture(options: { writer?: ReminderWriter } = {}): Promise<Fixtu
   const adminToken = loadOrCreateAdminToken(paths);
   const store = new Store(paths.db);
   const operations = new ReminderOperations(store, options.writer ?? m0GateWriter);
-  const server = LocalServer.create({ socketPath: paths.socket, facade: new ServiceFacade(store, operations, adminToken, 'test-version') });
+  const server = LocalServer.create({ socketPath: paths.socket, facade: new ServiceFacade(store, operations, adminToken, 'test-version', undefined, undefined, undefined, undefined, undefined, options.diagnostics) });
   await server.listen();
   const client = new HttpServiceClient(paths.socket);
   return {
@@ -80,7 +81,7 @@ test('malformed envelopes are rejected at the HTTP boundary', async (t) => {
     req.end(body);
   });
   assert.equal((await post('{not json')).status, 400);
-  assert.equal((await post(JSON.stringify({ method: 'clients.rotate', params: {} }))).status, 400);
+  assert.equal((await post(JSON.stringify({ method: 'clients.not-a-method', params: {} }))).status, 400);
   const missingAuth = await post(JSON.stringify({ method: 'capabilities', params: {} }));
   assert.equal(missingAuth.status, 200);
   assert.equal(JSON.parse(missingAuth.body).ok, false);
@@ -96,7 +97,61 @@ test('capabilities reports the service version and verified read adapters', asyn
   assert.deepEqual(result.capabilities.map((c) => c.status), ['available', 'available', 'available']);
   assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events']);
   assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create']);
-  assert.deepEqual(result.capabilities[2]?.operations, ['list_folders', 'get', 'search', 'create']);
+  assert.deepEqual(result.capabilities[2]?.operations, ['list_folders', 'get', 'search']);
+});
+
+test('management can replace policy, rotate credentials, and read metadata-only diagnostics', async (t) => {
+  const f = await fixture();
+  t.after(() => closeFixture(f));
+  const created = await pairClient(f, 'required');
+  const plan = await f.agent(created.token, 'operations.prepare', { idempotencyKey: 'policy-plan', change: { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE' } }) as { id: string };
+  const updated = await f.admin('clients.update', { id: created.id, name: 'Narrowed', grants: [] }) as { name: string; policyVersion: number };
+  assert.deepEqual(updated, { id: created.id, name: 'Narrowed', grants: [], policyVersion: 2, revoked: false });
+  const rows = await f.admin('operations.list') as Array<{ id: string; state: string }>;
+  assert.equal(rows.find((row) => row.id === plan.id)?.state, 'cancelled');
+  const rotated = await f.admin('clients.rotate', { id: created.id }) as { token: string };
+  await assert.rejects(f.agent(created.token, 'capabilities'), { code: 'permission_denied' });
+  assert.equal((await f.agent(rotated.token, 'capabilities') as { version: string }).version, 'test-version');
+  const diagnostics = await f.admin('diagnostics.summary') as { version: string; nativeProtocolVersion: number; storage: unknown };
+  assert.equal(diagnostics.version, 'test-version');
+  assert.equal(diagnostics.nativeProtocolVersion, 1);
+  assert.ok(!JSON.stringify(diagnostics).includes('PRIVATE'));
+});
+
+test('management can reject a prepared operation without attempting a native write', async (t) => {
+  const f = await fixture();
+  t.after(() => closeFixture(f));
+  const { token } = await pairClient(f, 'required');
+  const plan = await f.agent(token, 'operations.prepare', { idempotencyKey: 'reject-plan', change: { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE' } }) as { id: string };
+  const preview = await f.admin('operations.preview', { id: plan.id }) as { id: string; provider: string; state: string; expiresAt: number; change: { containerId: string; title: string } };
+  assert.equal(preview.id, plan.id); assert.equal(preview.provider, 'reminders'); assert.equal(preview.state, 'prepared'); assert.ok(preview.expiresAt > Date.now());
+  assert.deepEqual(preview.change, { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE', body: '' });
+  assert.deepEqual(await f.admin('operations.reject', { id: plan.id }), { rejected: plan.id });
+  const rows = await f.admin('operations.list') as Array<{ id: string; state: string }>;
+  assert.equal(rows.find((row) => row.id === plan.id)?.state, 'cancelled');
+  await assert.rejects(f.admin('operations.reject', { id: plan.id }), { code: 'conflict' });
+  await assert.rejects(f.admin('operations.preview', { id: plan.id }), { code: 'conflict' });
+});
+
+test('management diagnostics expose only fixed journaled actions', async (t) => {
+  let started = 0; let recovered = 0;
+  const f = await fixture({ diagnostics: {
+    startReminderM1: (containerId) => { started++; return { probeId: 'f8f5501f-e6a0-469a-8b99-9671943d1cbd', containerId, createdAt: 1 }; },
+    listReminderM1: () => [{ probeId: 'f8f5501f-e6a0-469a-8b99-9671943d1cbd', recoveryStatus: 'pending' }],
+    recoverReminderM1: (probeId) => { recovered++; return { probeId, status: 'recovering' }; },
+    findContainers: async (name) => ({ query: name, reminderLists: [], noteFolders: [], personalDataRead: false }),
+    runProbe: async () => ({ personalDataRead: false, writeAttempted: false }),
+  } });
+  t.after(() => closeFixture(f));
+  const startedResult = await f.admin('diagnostics.reminders_m1.start', { containerId: 'dedicated-list' }) as { containerId: string };
+  assert.equal(startedResult.containerId, 'dedicated-list'); assert.equal(started, 1);
+  assert.equal((await f.admin('diagnostics.reminders_m1.list') as unknown[]).length, 1);
+  await f.admin('diagnostics.reminders_m1.recover', { probeId: 'f8f5501f-e6a0-469a-8b99-9671943d1cbd' });
+  assert.equal(recovered, 1);
+  assert.deepEqual(await f.admin('diagnostics.find_containers', { name: 'Dedicated test' }), { query: 'Dedicated test', reminderLists: [], noteFolders: [], personalDataRead: false });
+  assert.deepEqual(await f.admin('diagnostics.probe'), { personalDataRead: false, writeAttempted: false });
+  await assert.rejects(f.admin('diagnostics.read_summary', { clientId: 'f8f5501f-e6a0-469a-8b99-9671943d1cbd', provider: 'reminders', containerId: 'test-list', limit: 10 }), { code: 'permission_denied' });
+  await assert.rejects(f.admin('diagnostics.reminders_m1.start', { containerId: '' }), { code: 'invalid_request' });
 });
 
 test('prepare → approve → commit → get; audit captured; staged content never leaves the service', async (t) => {

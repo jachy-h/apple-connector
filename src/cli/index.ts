@@ -4,10 +4,11 @@ import { capabilities } from '../application/capabilities.js';
 import { publicError } from '../application/errors.js';
 import { JxaRunner } from '../jxa/runner.js';
 import { HttpServiceClient } from '../transports/local/client.js';
-import { managementUrl, setup, startService, status, stopService } from '../transports/local/lifecycle.js';
+import { health, issueManagementUrl, setup, startService, status, stopService } from '../transports/local/lifecycle.js';
 import { spawn } from 'node:child_process';
 import { readAdminToken, statePaths } from '../transports/local/paths.js';
 import { runMcpEntry } from '../transports/mcp/index.js';
+import { runJournaledReminderM1Diagnostic, recoverJournaledReminderM1Diagnostic } from '../application/diagnostic-journal.js';
 import type { RpcMethod } from '../transports/local/rpc.js';
 
 const [command, ...args] = process.argv.slice(2);
@@ -29,9 +30,9 @@ function flagValue(flag: string): string | undefined {
   return value && !value.startsWith('--') ? value : undefined;
 }
 
-function openManagement(): boolean {
+function openManagement(url: string): boolean {
   if (process.platform !== 'darwin') return false;
-  const opener = spawn('/usr/bin/open', [managementUrl()], { detached: true, stdio: 'ignore' });
+  const opener = spawn('/usr/bin/open', [url], { detached: true, stdio: 'ignore' });
   opener.unref();
   return true;
 }
@@ -54,11 +55,17 @@ Usage: apple-connector <command>
                       Grant: provider, containerIds, actions, fields, approval, expiresAt
                       (expiresAt is Unix epoch milliseconds, the Date.now() scale)
   client revoke        Revoke a client (--id <client-id>)
+  client update        Replace name/access (--id <id> --name <name> --grant <json>, repeatable)
+  client rotate        Rotate a client credential (--id <client-id>; replacement shown once)
   mcp                  Run the stdio MCP entry (requires APPLE_CONNECTOR_TOKEN)
   open                 Open the local management interface (requires a running service)
   doctor [--probe]     Inspect runtime; --probe checks JXA/EventKit without personal-data access
   doctor --containers <name>
                        Find IDs of exactly named Reminders lists/Notes folders; no item content is read
+  doctor --reminders-m1 <list-id>
+                       Run a UUID-journaled create/update/complete/cleanup diagnostic in one test list
+  doctor --reminders-m1-recover <probe-uuid>
+                       Retry only the exact cleanup recorded by an existing diagnostic journal
   version              Print version
   --help               Print this help
 
@@ -74,8 +81,8 @@ The service refuses native writes until the M0 capability gate passes.`);
     case 'setup': {
       if (args.length) throw new Error('Unexpected arguments');
       const result = setup();
-      if (!status().running) await startService();
-      const opened = openManagement();
+      const started = await startService();
+      const opened = openManagement(started.url);
       const tokenNotice = result.adminTokenCreated
         ? `Administrator token (store it securely; shown once):\n${result.adminToken}`
         : 'Administrator token: already configured (not displayed again).';
@@ -83,13 +90,16 @@ The service refuses native writes until the M0 capability gate passes.`);
 State directory: ${result.paths.dir}
 ${tokenNotice}
 Reference: keep it out of the agent environment; management actions use it locally.
+Management URL: ${started.url}
 ${opened ? 'The one-time local management session was opened in your browser.' : 'Run `apple-connector open` on macOS to establish a browser session.'}`);
       break;
     }
 
     case 'start':
-      if (args.length) throw new Error('Unexpected arguments');
-      await startService();
+      if (args.length && !(args.length === 1 && args[0] === '--open')) throw new Error('Unexpected arguments');
+      const started = await startService();
+      const opened = args[0] === '--open' ? openManagement(started.url) : false;
+      console.log(`apple-connector service ${started.started ? 'started' : 'already running'} (pid ${started.pid}).\nManagement URL: ${started.url}${args[0] === '--open' && !opened ? '\nBrowser could not be opened; copy the URL above.' : ''}`);
       break;
 
     case 'stop':
@@ -101,13 +111,15 @@ ${opened ? 'The one-time local management session was opened in your browser.' :
     case 'status': {
       if (args.length) throw new Error('Unexpected arguments');
       const s = status();
+      const serviceHealth = await health();
       console.log(`apple-connector ${s.version}
-status:        ${s.running ? `running (pid ${s.pid})` : 'stopped'}
+status:        ${s.running ? `${serviceHealth.healthy ? 'healthy' : `degraded: ${serviceHealth.reason}`} (pid ${s.pid})` : 'stopped'}
 state dir:     ${s.paths.dir}
 db bytes:      ${s.dbBytes ?? 'n/a'}
 clients:       ${s.clients}
 operations:    ${s.operations}
-admin session: ${s.adminTokenFileExists ? 'present' : 'missing (run setup)'}`);
+admin session: ${s.adminTokenFileExists ? 'present' : 'missing (run setup)'}
+management:    ${s.running ? (s.managementAddress ?? 'starting') : 'stopped (run start)'}`);
       break;
     }
 
@@ -132,7 +144,20 @@ ${created.token}`);
         if (!id) throw new Error('client revoke requires --id <client-id>');
         await admin('clients.revoke', { id });
         console.log(`Revoked client ${id}; pending plans are cancelled.`);
-      } else throw new Error('Unknown client subcommand; use list, create or revoke.');
+      } else if (sub === 'update') {
+        const id = flagValue('--id');
+        const name = flagValue('--name');
+        if (!id || !name) throw new Error('client update requires --id <client-id> --name <name>');
+        const grants: unknown[] = [];
+        args.forEach((arg, i) => { if (arg === '--grant' && args[i + 1]) grants.push(JSON.parse(args[i + 1] as string)); });
+        const updated = await admin('clients.update', { id, name, grants }) as { id: string; policyVersion: number };
+        console.log(`Updated client ${updated.id}; policy v${updated.policyVersion}. Pending unexecuted plans were cancelled.`);
+      } else if (sub === 'rotate') {
+        const id = flagValue('--id');
+        if (!id) throw new Error('client rotate requires --id <client-id>');
+        const rotated = await admin('clients.rotate', { id }) as { client: { id: string; name: string }; token: string };
+        console.log(`Rotated credential for "${rotated.client.name}" ${rotated.client.id}.\nReplacement token (shown once):\n${rotated.token}`);
+      } else throw new Error('Unknown client subcommand; use list, create, update, rotate or revoke.');
       break;
     }
 
@@ -142,24 +167,37 @@ ${created.token}`);
       break;
 
     case 'open': {
-      if (args.length) throw new Error('Unexpected arguments');
-      if (process.platform !== 'darwin') throw new Error('The management browser launcher is available only on macOS.');
-      openManagement();
-      console.log('Opened Apple Connector management interface.');
+      if (args.length && !(args.length === 1 && args[0] === '--print')) throw new Error('Unexpected arguments');
+      const url = await issueManagementUrl();
+      if (args[0] === '--print') { console.log(url); break; }
+      if (process.platform !== 'darwin') throw new Error(`The management browser launcher is available only on macOS. Open this URL manually: ${url}`);
+      openManagement(url);
+      console.log(`Opened Apple Connector management interface.\nManagement URL: ${url}`);
       break;
     }
 
     case 'doctor': {
       const containerName = args[0] === '--containers' ? args[1] : undefined;
-      if (!((args.length === 0) || (args.length === 1 && args[0] === '--probe') || (args.length === 2 && typeof containerName === 'string' && containerName.length > 0))) {
+      const remindersM1List = args[0] === '--reminders-m1' ? args[1] : undefined;
+      const recoveryProbeId = args[0] === '--reminders-m1-recover' ? args[1] : undefined;
+      if (!((args.length === 0) || (args.length === 1 && args[0] === '--probe') ||
+        (args.length === 2 && typeof containerName === 'string' && containerName.length > 0) ||
+        (args.length === 2 && typeof remindersM1List === 'string' && remindersM1List.length > 0) ||
+        (args.length === 2 && typeof recoveryProbeId === 'string' && recoveryProbeId.length > 0))) {
         throw new Error('Unexpected arguments');
       }
-      const native = args[0] === '--probe' && process.platform === 'darwin' ? await new JxaRunner().run('diagnostics.probe')
-        : containerName && process.platform === 'darwin' ? await new JxaRunner().run('diagnostics.findTestContainers', { name: containerName }) : null;
+      if ((remindersM1List || recoveryProbeId) && process.platform !== 'darwin') throw new Error('Reminders diagnostics require macOS.');
+      const runner = new JxaRunner();
+      const native = args[0] === '--probe' && process.platform === 'darwin' ? await runner.run('diagnostics.probe')
+        : containerName && process.platform === 'darwin' ? await runner.run('diagnostics.findTestContainers', { name: containerName })
+        : remindersM1List ? await runJournaledReminderM1Diagnostic(runner, statePaths().dir, remindersM1List)
+        : recoveryProbeId ? await recoverJournaledReminderM1Diagnostic(runner, statePaths().dir, recoveryProbeId) : null;
       console.log(JSON.stringify({
         version: appVersion, platform: process.platform, arch: process.arch,
         node: process.version, native, capabilities: capabilities(),
-        note: containerName ? 'Container discovery returns metadata only; it does not read reminder or note content.' : 'Bridge visibility does not establish data access, permission attribution or write safety.',
+        note: containerName ? 'Container discovery returns metadata only; it does not read reminder or note content.'
+          : remindersM1List || recoveryProbeId ? 'The diagnostic journal is retained for exact recovery and contains no reminder body.'
+          : 'Bridge visibility does not establish data access, permission attribution or write safety.',
       }, null, 2));
       if (process.platform !== 'darwin') process.exitCode = 1;
       break;

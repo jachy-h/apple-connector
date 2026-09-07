@@ -56,3 +56,22 @@ test('management site exchanges a one-time loopback link for a CSRF-protected ad
   assert.equal(agentMethod.status, 200);
   assert.equal((JSON.parse(agentMethod.body) as { ok: boolean }).ok, false);
 });
+
+test('management site can reissue a login link without invalidating an established session', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'apple-connector-admin-'));
+  const store = new Store(':memory:');
+  const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter), 'admin-token', appVersion);
+  const server = new AdminWebServer({ facade, staticRoot: root });
+  writeFileSync(join(root, 'index.html'), '<!doctype html><title>Apple Connector</title>');
+  t.after(async () => { await server.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
+  const first = new URL(await server.listen());
+  const second = new URL(server.issueManagementUrl());
+
+  assert.notEqual(first.search, second.search);
+  assert.equal((await call(first, `${first.pathname}${first.search}`)).status, 403, 'reissuing invalidates an unused older link');
+  const bootstrap = await call(second, `${second.pathname}${second.search}`);
+  const session = (bootstrap.headers['set-cookie'] as string[])[0]!.split(';')[0]!;
+  assert.equal((await call(second, '/', { headers: { cookie: session } })).status, 200);
+  const third = new URL(server.issueManagementUrl());
+  assert.equal((await call(third, '/', { headers: { cookie: session } })).status, 200, 'new links do not log out active sessions');
+});

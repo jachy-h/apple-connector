@@ -9,9 +9,21 @@ export const rpcMethodSchema = z.enum([
   'reminders.list',
   'notes.list_folders', 'notes.get', 'notes.search',
   'operations.prepare', 'operations.commit', 'operations.get',
-  'clients.list', 'clients.create', 'clients.revoke',
-  'operations.approve',
-  'audit.list', 'audit.summary', 'audit.clear', 'operations.list',
+  'clients.list', 'clients.create', 'clients.update', 'clients.rotate', 'clients.revoke',
+  'operations.approve', 'operations.reject', 'operations.preview',
+  'audit.list', 'audit.query', 'audit.summary', 'audit.clear', 'operations.list', 'operations.query',
+  'diagnostics.summary',
+  'diagnostics.reminders_m1.start', 'diagnostics.reminders_m1.list', 'diagnostics.reminders_m1.recover',
+  'diagnostics.find_containers',
+  'diagnostics.probe',
+  'diagnostics.permissions.request',
+  'diagnostics.read_summary',
+  'web.find_containers',
+  'web.calendar.list_events',
+  'web.reminders.list',
+  'web.notes.search', 'web.notes.get',
+  'web.reminders.create', 'web.operations.get',
+  'management.issue_link',
 ]);
 export type RpcMethod = z.infer<typeof rpcMethodSchema>;
 
@@ -34,4 +46,6 @@ export const rpcFail = (error: unknown): RpcError => {
 /** Agent-facing methods; never expose admin methods through an agent transport. */
 export const agentMethods = new Set<RpcMethod>(['capabilities', 'calendar.list_calendars', 'calendar.list_events', 'reminders.list_lists', 'reminders.list', 'notes.list_folders', 'notes.get', 'notes.search', 'operations.prepare', 'operations.commit', 'operations.get']);
 /** Management methods; require a trusted local admin session. */
-export const adminMethods = new Set<RpcMethod>(['clients.list', 'clients.create', 'clients.revoke', 'operations.approve', 'audit.list', 'audit.summary', 'audit.clear', 'operations.list']);
+export const adminMethods = new Set<RpcMethod>(['clients.list', 'clients.create', 'clients.update', 'clients.rotate', 'clients.revoke', 'operations.approve', 'operations.reject', 'operations.preview', 'audit.list', 'audit.query', 'audit.summary', 'audit.clear', 'operations.list', 'operations.query', 'diagnostics.summary', 'diagnostics.reminders_m1.start', 'diagnostics.reminders_m1.list', 'diagnostics.reminders_m1.recover', 'diagnostics.find_containers', 'diagnostics.probe', 'diagnostics.permissions.request', 'diagnostics.read_summary', 'web.find_containers', 'web.calendar.list_events', 'web.reminders.list', 'web.notes.search', 'web.notes.get', 'web.reminders.create', 'web.operations.get']);
+/** Local CLI-only administration methods. They require the persistent admin token and are never exposed to the browser. */
+export const localAdminMethods = new Set<RpcMethod>([...adminMethods, 'management.issue_link']);

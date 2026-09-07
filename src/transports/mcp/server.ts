@@ -3,7 +3,6 @@ import { z } from 'zod';
 import { appVersion } from '../../application/version.js';
 import { publicError } from '../../application/errors.js';
 import { createReminderSchema } from '../../providers/reminders/types.js';
-import { createNoteSchema } from '../../providers/notes/types.js';
 import type { ServiceClient } from '../local/client.js';
 
 function textResult(payload: unknown) {
@@ -78,7 +77,7 @@ export function createMcpServer(client: ServiceClient, token: string): McpServer
     description: 'Create an immutable change plan for an allowed reminder list. Committing executes the plan; nothing is written until `changes.commit`.',
     inputSchema: {
       idempotencyKey: z.string().min(1).max(128).describe('Client-chosen key; reusing it with different content is rejected.'),
-      change: z.union([createReminderSchema, createNoteSchema]).describe('Reminder or simple-note creation targeting a granted container.'),
+      change: createReminderSchema.describe('Reminder creation targeting a granted container. Notes are read-only.'),
     },
   }, async (args) => {
     try { return textResult(await client.request('operations.prepare', args, token)); }

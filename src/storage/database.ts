@@ -22,7 +22,7 @@ export class Store {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL;');
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 2) {
+    if (row.user_version > 3) {
       this.db.close();
       throw new ConnectorError('service_unavailable', 'Database was created by a newer version.');
     }
@@ -41,6 +41,13 @@ export class Store {
       ALTER TABLE operations ADD COLUMN provider TEXT NOT NULL DEFAULT 'reminders';
       PRAGMA user_version=2;
     `));
+    if (row.user_version <= 2) this.transaction(() => this.db.exec(`
+      CREATE TABLE web_operations (id TEXT PRIMARY KEY, provider TEXT NOT NULL,
+        key_hash TEXT UNIQUE NOT NULL, request_hash TEXT NOT NULL, state TEXT NOT NULL,
+        payload TEXT, result TEXT, created_at INTEGER NOT NULL);
+      CREATE INDEX web_operations_created_at ON web_operations(created_at DESC);
+      PRAGMA user_version=3;
+    `));
   }
 
   transaction<T>(work: () => T): T {
@@ -57,6 +64,31 @@ export class Store {
       this.db.prepare('INSERT INTO clients(id,name,token_hash,grants) VALUES(?,?,?,?)')
         .run(id, parsed.name, digest(token), JSON.stringify(parsed.grants));
       this.audit({ at: Date.now(), clientId: id, action: 'client_created', outcome: 'allowed', count: 0 });
+    });
+    return { client: this.client(id), token };
+  }
+
+  updateClient(id: string, input: unknown): Client {
+    const current = this.client(id);
+    if (current.revoked) throw new ConnectorError('conflict', 'Revoked clients cannot be edited.');
+    const parsed = clientInputSchema.parse(input);
+    this.transaction(() => {
+      this.db.prepare('UPDATE clients SET name=?,grants=?,policy_version=policy_version+1 WHERE id=? AND revoked=0')
+        .run(parsed.name, JSON.stringify(parsed.grants), id);
+      // Every policy change invalidates executable plans; the next prepare binds the new version.
+      this.db.prepare("UPDATE operations SET state='cancelled',payload=NULL WHERE client_id=? AND state IN ('prepared','approved')").run(id);
+      this.audit({ at: Date.now(), clientId: id, action: 'client_updated', outcome: 'allowed', count: 0 });
+    });
+    return this.client(id);
+  }
+
+  rotateClientToken(id: string): { client: Client; token: string } {
+    const current = this.client(id);
+    if (current.revoked) throw new ConnectorError('conflict', 'Revoked clients cannot rotate credentials.');
+    const token = randomBytes(32).toString('base64url');
+    this.transaction(() => {
+      this.db.prepare('UPDATE clients SET token_hash=? WHERE id=? AND revoked=0').run(digest(token), id);
+      this.audit({ at: Date.now(), clientId: id, action: 'client_token_rotated', outcome: 'allowed', count: 0 });
     });
     return { client: this.client(id), token };
   }
@@ -96,10 +128,36 @@ export class Store {
     });
   }
 
+  queryOperations(input: { offset?: number | undefined; limit?: number | undefined; provider?: string | undefined; clientId?: string | undefined; state?: string | undefined } = {}): { items: ReturnType<Store['listOperations']>; total: number; offset: number; limit: number } {
+    const offset = input.offset ?? 0; const limit = input.limit ?? 50;
+    const clauses: string[] = []; const values: (string | number)[] = [];
+    if (input.provider) { clauses.push('provider=?'); values.push(input.provider); }
+    if (input.clientId) { clauses.push('client_id=?'); values.push(input.clientId); }
+    if (input.state) { clauses.push('state=?'); values.push(input.state); }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM operations${where}`).get(...values) as { count: number }).count;
+    const rows = this.db.prepare(`SELECT id,client_id,provider,key_hash,request_hash,policy_version,state,expires_at,created_at,result FROM operations${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as unknown[];
+    const items = rows.map((row) => {
+      const r = row as { id: string; client_id: string; provider: string; key_hash: string; request_hash: string; policy_version: number; state: string; expires_at: number; created_at: number; result: string | null; };
+      return { id: r.id, clientId: r.client_id, provider: r.provider, state: r.state, keyHash: r.key_hash, requestHash: r.request_hash, policyVersion: r.policy_version, expiresAt: r.expires_at, createdAt: r.created_at, result: r.result };
+    });
+    return { items, total, offset, limit };
+  }
+
   operationProvider(id: string): string {
     const row = this.db.prepare('SELECT provider FROM operations WHERE id=?').get(id) as { provider: string } | undefined;
     if (!row) throw new ConnectorError('permission_denied', 'Unknown or inaccessible plan.');
     return row.provider;
+  }
+
+  /** Content is available only while a plan is executable and only to the trusted management session. */
+  operationPreview(id: string): { id: string; clientId: string; provider: string; state: string; expiresAt: number; change: unknown } {
+    const row = this.db.prepare('SELECT id,client_id,provider,state,expires_at,payload FROM operations WHERE id=?').get(id) as { id: string; client_id: string; provider: string; state: string; expires_at: number; payload: string | null } | undefined;
+    if (!row) throw new ConnectorError('permission_denied', 'Unknown operation.');
+    if (!['prepared', 'approved'].includes(row.state) || !row.payload) throw new ConnectorError('conflict', 'The plan content is no longer available for preview.');
+    let change: unknown;
+    try { change = JSON.parse(row.payload); } catch { throw new ConnectorError('service_unavailable', 'Stored plan content is invalid.'); }
+    return { id: row.id, clientId: row.client_id, provider: row.provider, state: row.state, expiresAt: row.expires_at, change };
   }
 
   revoke(id: string): void {
@@ -111,7 +169,18 @@ export class Store {
     });
   }
 
-  audit(input: AuditEvent): void {
+  /** Reject only a not-yet-approved immutable plan; no native call is attempted. */
+  rejectOperation(id: string): void {
+    this.transaction(() => {
+      const operation = this.db.prepare('SELECT client_id,state FROM operations WHERE id=?').get(id) as { client_id: string; state: string } | undefined;
+      if (!operation) throw new ConnectorError('permission_denied', 'Unknown operation.');
+      if (operation.state !== 'prepared') throw new ConnectorError('conflict', `Only prepared operations can be rejected (current state: ${operation.state}).`);
+      this.db.prepare("UPDATE operations SET state='cancelled',payload=NULL WHERE id=? AND state='prepared'").run(id);
+      this.audit({ at: Date.now(), clientId: operation.client_id, operationId: id, action: 'operation_rejected', outcome: 'denied', count: 0 });
+    });
+  }
+
+  audit(input: Omit<AuditEvent, 'source'> & { source?: 'client' | 'web' }): void {
     const event = auditEventSchema.parse(input);
     const json = JSON.stringify(event);
     this.db.prepare('INSERT INTO audit(at,event,bytes) VALUES(?,?,?)').run(event.at, json, Buffer.byteLength(json));
@@ -122,9 +191,33 @@ export class Store {
       .map((row) => JSON.parse(row.event as string) as AuditEvent);
   }
 
+  queryAudit(input: { offset?: number | undefined; limit?: number | undefined; provider?: string | undefined; clientId?: string | undefined; source?: 'client' | 'web' | undefined; outcome?: string | undefined; from?: number | undefined; to?: number | undefined } = {}): { items: AuditEvent[]; total: number; offset: number; limit: number } {
+    const offset = input.offset ?? 0; const limit = input.limit ?? 50;
+    const filtered = (this.db.prepare('SELECT event FROM audit ORDER BY id DESC').all() as Array<{ event: string }>).map((row) => JSON.parse(row.event) as AuditEvent)
+      .filter((event) => (!input.provider || event.provider === input.provider) && (!input.clientId || event.clientId === input.clientId) && (!input.source || event.source === input.source) && (!input.outcome || event.outcome === input.outcome) && (input.from === undefined || event.at >= input.from) && (input.to === undefined || event.at <= input.to));
+    return { items: filtered.slice(offset, offset + limit), total: filtered.length, offset, limit };
+  }
+
   auditSummary(): { count: number; bytes: number } {
     const row = this.db.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM audit').get() as { count: number; bytes: number };
     return { count: row.count, bytes: row.bytes };
+  }
+
+  diagnostics(): {
+    operationsByState: Record<string, number>;
+    pageSize: number;
+    pageCount: number;
+    freePages: number;
+    recentErrors: Array<Pick<AuditEvent, 'at' | 'provider' | 'action' | 'errorCode'>>;
+  } {
+    const states = this.db.prepare('SELECT state,COUNT(*) AS count FROM operations GROUP BY state').all() as Array<{ state: string; count: number }>;
+    const pageSize = (this.db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
+    const pageCount = (this.db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count;
+    const freePages = (this.db.prepare('PRAGMA freelist_count').get() as { freelist_count: number }).freelist_count;
+    const recentErrors = this.auditEvents().filter((event) => event.errorCode).slice(0, 10)
+      .map((event) => ({ at: event.at, ...(event.provider ? { provider: event.provider } : {}), action: event.action,
+        ...(event.errorCode ? { errorCode: event.errorCode } : {}) }));
+    return { operationsByState: Object.fromEntries(states.map((row) => [row.state, row.count])), pageSize, pageCount, freePages, recentErrors };
   }
 
   /** Explicit user-management action. No replacement audit row is written because the request is to clear it. */

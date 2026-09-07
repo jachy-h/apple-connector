@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { JxaRunner } from '../../src/jxa/runner.js';
 import { JxaCalendarReader } from '../../src/providers/calendar/jxa-reader.js';
+import { runReminderM1Diagnostic } from '../../src/application/reminder-m1-diagnostic.js';
 
 test('real JXA loads EventKit without requesting permissions', { skip: process.platform !== 'darwin' }, async () => {
   const result = await new JxaRunner().run('diagnostics.probe') as Record<string, unknown>;
@@ -34,6 +36,52 @@ test('M0 probe creates, rereads and removes only its own reminder in the opted-i
   assert.equal(result.containerId, process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID);
   assert.equal(result.createdAndRemoved, true);
 });
+
+test('M1 probe updates, completes and removes only its own reminder in the opted-in test list', {
+  skip: process.platform !== 'darwin' || !process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID,
+}, async () => {
+  const events: string[] = [];
+  const result = await runReminderM1Diagnostic(new JxaRunner(), process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID!,
+    (event) => events.push(`${event.stage}:${event.status}`));
+  assert.match(result.probeId, /^[0-9a-f-]{36}$/);
+  assert.ok(result.stableId.length > 0);
+  assert.equal(result.cleanup.status, 'removed_verified');
+  assert.deepEqual(events.filter((event) => event.endsWith(':succeeded')).map((event) => event.split(':')[0]),
+    ['create', 'update_title', 'update_body', 'update_due', 'complete', 'verify', 'cleanup']);
+});
+
+test('M1 recovery deletion requires a caller-held probe UUID', {
+  skip: process.platform !== 'darwin' || !process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID,
+}, async () => {
+  const result = await new JxaRunner().run('diagnostics.remindersDeleteM1Probe', {
+    containerId: process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID,
+    probeId: randomUUID(),
+  }) as Record<string, unknown>;
+  assert.equal(result.status, 'not_found');
+  assert.equal(result.stableId, null);
+});
+
+test('M0 UUID recovery is a verified no-op for a missing probe', {
+  skip: process.platform !== 'darwin' || !process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID,
+}, async () => {
+  const result = await new JxaRunner().run('diagnostics.remindersDeleteM0ProbeByUuid', {
+    containerId: process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID,
+    probeId: randomUUID(),
+  }) as Record<string, unknown>;
+  assert.equal(result.status, 'not_found');
+  assert.equal(result.stableId, null);
+});
+
+test('EventKit checks only the supplied Reminders list identifier', {
+  skip: process.platform !== 'darwin' || !process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID,
+}, async () => {
+  const result = await new JxaRunner().run('diagnostics.remindersEventKitAccess', {
+    containerId: process.env.APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID,
+  }) as Record<string, unknown>;
+  assert.equal(typeof result.matches, 'number');
+  if (result.matches === 1) assert.equal(typeof result.allowsContentModifications, 'boolean');
+});
+
 
 test('M0 probe creates, rereads and removes only its own event in the opted-in test calendar', {
   skip: process.platform !== 'darwin' || !process.env.APPLE_CONNECTOR_CALENDAR_TEST_NAME,

@@ -9,10 +9,22 @@ export const scriptRegistry = {
   'diagnostics.roundtrip': { path: 'diagnostics/roundtrip.js', mutates: false },
   // This creates and removes only a clearly-labelled, newly-created probe reminder in a caller-specified list.
   'diagnostics.remindersCrud': { path: 'diagnostics/reminders-crud.js', mutates: true, timeoutMs: 60_000 },
+  // Creates, updates, completes and removes only a UUID-labelled probe in a caller-specified list.
+  'diagnostics.remindersUpdateCrud': { path: 'diagnostics/reminders-update-crud.js', mutates: true, timeoutMs: 60_000 },
+  // M1 is split at native-call boundaries so a timeout identifies the last attempted mutation.
+  'diagnostics.remindersM1Create': { path: 'diagnostics/reminders-m1-step.js', mutates: true, timeoutMs: 30_000 },
+  'diagnostics.remindersM1UpdateTitle': { path: 'diagnostics/reminders-m1-step.js', mutates: true, timeoutMs: 30_000 },
+  'diagnostics.remindersM1UpdateBody': { path: 'diagnostics/reminders-m1-step.js', mutates: true, timeoutMs: 30_000 },
+  'diagnostics.remindersM1UpdateDue': { path: 'diagnostics/reminders-m1-step.js', mutates: true, timeoutMs: 30_000 },
+  'diagnostics.remindersM1Complete': { path: 'diagnostics/reminders-m1-step.js', mutates: true, timeoutMs: 30_000 },
+  'diagnostics.remindersM1Verify': { path: 'diagnostics/reminders-m1-step.js', mutates: false, timeoutMs: 30_000 },
+  // Recovery-only deletion requires the UUID held before the original write; ambiguous matches reject.
+  'diagnostics.remindersDeleteM1Probe': { path: 'diagnostics/reminders-delete-m1-probe.js', mutates: true, timeoutMs: 60_000 },
   'diagnostics.calendarCrud': { path: 'diagnostics/calendar-crud.js', mutates: true, timeoutMs: 60_000 },
   'diagnostics.notesCrud': { path: 'diagnostics/notes-crud.js', mutates: true, timeoutMs: 60_000 },
   'diagnostics.calendarEventKitCrud': { path: 'diagnostics/calendar-eventkit-crud.js', mutates: true, timeoutMs: 60_000 },
   'diagnostics.calendarEventKitAccess': { path: 'diagnostics/calendar-eventkit-access.js', mutates: false, timeoutMs: 60_000 },
+  'diagnostics.remindersEventKitAccess': { path: 'diagnostics/reminders-eventkit-access.js', mutates: false, timeoutMs: 60_000 },
   'reminders.preflight': { path: 'reminders/write.js', mutates: false, timeoutMs: 60_000 },
   'reminders.create': { path: 'reminders/write.js', mutates: true, timeoutMs: 60_000 },
   'reminders.verify': { path: 'reminders/write.js', mutates: false, timeoutMs: 60_000 },
@@ -25,7 +37,9 @@ export const scriptRegistry = {
   'diagnostics.notesDeleteProbe': { path: 'diagnostics/notes-delete.js', mutates: true, timeoutMs: 60_000 },
   'reminders.listLists': { path: 'reminders/read.js', mutates: false, timeoutMs: 60_000 },
   'reminders.list': { path: 'reminders/read.js', mutates: false, timeoutMs: 60_000 },
+  'reminders.listEventKit': { path: 'reminders/eventkit-read.js', mutates: false, timeoutMs: 25_000 },
   'diagnostics.remindersDeleteProbe': { path: 'diagnostics/reminders-delete.js', mutates: true, timeoutMs: 60_000 },
+  'diagnostics.remindersDeleteM0ProbeByUuid': { path: 'diagnostics/reminders-delete-m0-probe.js', mutates: true, timeoutMs: 60_000 },
   'calendar.listCalendars': { path: 'calendar/read.js', mutates: false, timeoutMs: 60_000 },
   'calendar.listEvents': { path: 'calendar/read.js', mutates: false, timeoutMs: 60_000 },
 } as const;

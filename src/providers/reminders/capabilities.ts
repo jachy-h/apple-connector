@@ -1,10 +1,10 @@
 import type { Capability } from '../types.js';
 
 export const remindersCapability: Capability = {
-  provider: 'reminders', backend: 'apple-events', status: 'available', operations: ['list_lists', 'list', 'create'],
+  provider: 'reminders', backend: 'eventkit-bridge', status: 'available', operations: ['list_lists', 'list', 'create'],
   limitations: [
     'Creation is limited to an explicitly granted list; iCloud may delay visibility after a write.',
-    'Reminders scripting dictionary does not expose recurrence or list sharing status.',
+    'EventKit IDs are local to the current macOS data-store context and may change after an account reset.',
     'Existing reminders must not be modified until their supported shape can be established.',
   ],
 };

@@ -22,7 +22,7 @@ export class JxaReminderReader {
     return result.map((value) => { const row = record(value, 'Native reader returned invalid list.'); return { id: text(row.id, 'Native reader returned invalid list.', 512), name: text(row.name, 'Native reader returned invalid list.', 500) }; });
   }
   async list(listId: string, offset = 0, limit = 50): Promise<ReminderPage> {
-    const row = record(await this.runner.run('reminders.list', { listId, offset, limit }), 'Native reader returned invalid reminder page.');
+    const row = record(await this.runner.run('reminders.listEventKit', { listId, offset, limit }), 'Native reader returned invalid reminder page.');
     const nextOffset = row.nextOffset;
     if (!Array.isArray(row.items) || (nextOffset !== null && (!Number.isInteger(nextOffset) || typeof nextOffset !== 'number' || nextOffset < 0))) throw new ConnectorError('protocol_error', 'Native reader returned invalid reminder page.');
     return { items: row.items.map(item), nextOffset: nextOffset as number | null };

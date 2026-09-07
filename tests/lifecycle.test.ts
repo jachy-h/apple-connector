@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { managementUrl, setup, startService, status, stopService } from '../src/transports/local/lifecycle.js';
+import { health, issueManagementUrl, managementUrl, setup, startService, status, stopService } from '../src/transports/local/lifecycle.js';
 import { acquireServiceLock, releaseServiceLock, statePaths } from '../src/transports/local/paths.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'apple-connector-lifecycle-'));
@@ -15,6 +15,10 @@ test('status reports stopped before setup', () => {
   assert.equal(s.running, false);
   assert.equal(s.adminTokenFileExists, false);
   assert.ok(s.paths.dir.startsWith(dir));
+});
+
+test('health reports a stopped service without trusting a PID file', async () => {
+  assert.deepEqual(await health(), { healthy: false, reason: 'Service is not running.' });
 });
 
 test('setup initialises the state directory, admin session and database', () => {
@@ -48,7 +52,13 @@ test('start spawns the detached service, then stop shuts it down and removes the
   const running = status();
   assert.equal(running.running, true);
   assert.ok(running.pid !== null && Number.isInteger(running.pid));
+  assert.match(running.managementAddress ?? '', /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.deepEqual(await health(), { healthy: true });
   assert.match(managementUrl(), /^http:\/\/127\.0\.0\.1:\d+\/\?bootstrap=/);
+  const replacement = await issueManagementUrl();
+  assert.match(replacement, /^http:\/\/127\.0\.0\.1:\d+\/\?bootstrap=/);
+  const reused = await startService();
+  assert.equal(reused.started, false);
   await stopService();
   const stopped = status();
   assert.equal(stopped.running, false);

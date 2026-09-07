@@ -1,6 +1,6 @@
 {
   "name": "apple-connector",
-  "version": "0.1.0-dev.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Scoped local Apple data access for agents",
@@ -11,7 +11,9 @@
     "apple-connector": "dist/src/cli/index.js"
   },
   "scripts": {
-    "build": "npm run build:web && tsc -p tsconfig.json && rm -rf dist/web && cp -R web/dist dist/web",
+    "start": "npm run build && node dist/src/cli/index.js start --open",
+    "build": "npm run build:web && tsc -p tsconfig.json && npm run build:native && rm -rf dist/web && cp -R web/dist dist/web",
+    "build:native": "swift build -c release --package-path native && mkdir -p dist/native && cp native/.build/release/apple-connector-helper dist/native/apple-connector-helper",
     "build:web": "vite build --config vite.config.ts",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "check:jxa": "node scripts/check-jxa.mjs",
@@ -23,6 +25,7 @@
   "files": [
     "dist/",
     "scripts/jxa/",
+    "native/",
     "README.md",
     "README_zh.md",
     "docs/native-validation.md"

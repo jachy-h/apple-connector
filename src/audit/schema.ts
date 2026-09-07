@@ -3,10 +3,15 @@ import { providerSchema } from '../policy/schema.js';
 
 export const auditEventSchema = z.object({
   at: z.number().int().nonnegative(),
-  clientId: z.string().max(128),
+  // Web debugging is authenticated by the loopback management session, not an MCP client.
+  // Keep clientId optional so old client-origin records remain fully compatible.
+  clientId: z.string().max(128).optional(),
+  source: z.enum(['client', 'web']).default('client'),
   operationId: z.string().max(128).optional(),
   provider: providerSchema.optional(),
-  action: z.enum(['read', 'create', 'update', 'complete', 'client_created', 'client_revoked', 'approved', 'denied']),
+  target: z.string().max(512).optional(),
+  durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
+  action: z.enum(['read', 'create', 'update', 'complete', 'client_created', 'client_updated', 'client_token_rotated', 'client_revoked', 'approved', 'operation_rejected', 'denied']),
   outcome: z.enum(['allowed', 'denied', 'succeeded', 'failed', 'outcome_unknown']),
   count: z.number().int().nonnegative().max(1000).default(0),
   policyVersion: z.number().int().nonnegative().optional(),

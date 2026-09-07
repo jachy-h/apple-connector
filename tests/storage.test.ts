@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/storage/database.js';
 import { ReminderOperations } from '../src/operations/reminders.js';
+import { WebWrites } from '../src/application/web-writes.js';
+import { ServiceFacade } from '../src/transports/local/handlers.js';
 import { DatabaseSync } from 'node:sqlite';
 
 test('disk database reopens with credentials and private filesystem permissions', () => {
@@ -23,6 +25,24 @@ test('disk database reopens with credentials and private filesystem permissions'
       assert.throws(() => second.authenticate(token), { code: 'permission_denied' });
     } finally { second.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('client policy edits cancel pending plans and credential rotation invalidates the old token', () => {
+  const store = new Store(':memory:');
+  try {
+    const created = store.createClient({ name: 'Before', grants: [{ provider: 'reminders', containerIds: ['one'], actions: ['create'], expiresAt: Date.now() + 60_000 }] });
+    store.db.prepare(`INSERT INTO operations(id,client_id,provider,key_hash,request_hash,policy_version,state,payload,expires_at,created_at)
+      VALUES('pending',?,'reminders','key','request',1,'approved','{}',?,?)`).run(created.client.id, Date.now() + 60_000, Date.now());
+    const updated = store.updateClient(created.client.id, { name: 'After', grants: [{ provider: 'notes', containerIds: ['two'], actions: ['read'], expiresAt: Date.now() + 60_000 }] });
+    assert.equal(updated.name, 'After');
+    assert.equal(updated.policyVersion, 2);
+    assert.equal(store.db.prepare("SELECT state FROM operations WHERE id='pending'").get()?.state, 'cancelled');
+    assert.equal(store.db.prepare("SELECT payload FROM operations WHERE id='pending'").get()?.payload, null);
+    const rotated = store.rotateClientToken(created.client.id);
+    assert.throws(() => store.authenticate(created.token), { code: 'permission_denied' });
+    assert.equal(store.authenticate(rotated.token).id, created.client.id);
+    assert.equal(rotated.client.policyVersion, 2);
+  } finally { store.close(); }
 });
 
 test('maintenance removes expired content but retains unknown outcomes', () => {
@@ -59,6 +79,76 @@ test('audit summary and explicit clearing retain no metadata or logical-byte bud
   } finally { store.close(); }
 });
 
+test('web writes are idempotent, isolated from clients, and retain no content after completion', async () => {
+  const store = new Store(':memory:'); let writes = 0;
+  const reminders = { preflight: async () => {}, create: async (change: { containerId: string }) => ({ id: `r-${++writes}`, containerId: change.containerId }), verify: async () => true };
+  const notes = { preflight: async () => {}, create: async (change: { containerId: string }) => ({ id: 'n-1', containerId: change.containerId }), verify: async () => true };
+  try {
+    const web = new WebWrites(store, reminders, notes);
+    const input = { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE TITLE', body: 'PRIVATE BODY' };
+    const [one, two] = await Promise.all([web.submitReminders('web-key', input), web.submitReminders('web-key', input)]);
+    assert.equal(writes, 1); assert.equal(one.id, two.id); assert.equal(one.state, 'succeeded');
+    assert.ok(!JSON.stringify(store.db.prepare('SELECT * FROM web_operations').all()).includes('PRIVATE'));
+    const audit = store.queryAudit({ source: 'web' });
+    assert.equal(audit.total, 1); assert.ok(audit.items.every((event) => !event.clientId)); assert.ok((audit.items[0]?.durationMs ?? -1) >= 0);
+    assert.throws(() => web.get('unknown'), { code: 'permission_denied' });
+  } finally { store.close(); }
+});
+
+test('management Web endpoints read through session-only methods and emit isolated audit events', async () => {
+  const store = new Store(':memory:');
+  const reminderOps = new ReminderOperations(store, { preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true });
+  const facade = new ServiceFacade(store, reminderOps, 'admin', 'test', undefined,
+    { search: async (folderId: string, query: string) => [{ id: 'note', folderId, title: 'private', snippet: query }], get: async () => ({ id: 'note', folderId: 'folder', title: 'private', snippet: '', body: 'private body' }) } as never,
+    { list: async (listId: string) => ({ items: [{ id: 'r', listId, title: 'private', body: '', completed: false, due: null }], nextOffset: null }) } as never,
+    { listEvents: async (calendarId: string) => ({ items: [{ calendarId, title: 'private', start: '2026-01-01T00:00:00.000Z', end: '2026-01-01T01:00:00.000Z', allDay: false, location: '', notes: '' }], nextOffset: null }) } as never);
+  try {
+    const response = await facade.management('web.notes.search', { folderId: 'folder', query: 'x', limit: 50 });
+    assert.equal(response.ok, true);
+    const audit = store.queryAudit({ source: 'web' });
+    assert.equal(audit.total, 1); assert.equal(audit.items[0]?.provider, 'notes'); assert.equal(JSON.stringify(audit).includes('private'), false);
+    const denied = await facade.agent('web.notes.search', { folderId: 'folder', query: 'x' }, 'not-a-client-token');
+    assert.equal(denied.ok, false);
+  } finally { store.close(); }
+});
+
+test('management audit and operation queries filter before paginating', () => {
+  const store = new Store(':memory:');
+  try {
+    const one = store.createClient({ name: 'One', grants: [] }).client.id;
+    const two = store.createClient({ name: 'Two', grants: [] }).client.id;
+    store.audit({ at: 1, clientId: one, provider: 'notes', action: 'read', outcome: 'allowed', count: 1 });
+    store.audit({ at: 2, clientId: two, provider: 'reminders', action: 'create', outcome: 'failed', count: 1, errorCode: 'service_unavailable' });
+    store.audit({ at: 3, clientId: one, provider: 'notes', action: 'create', outcome: 'allowed', count: 1 });
+    store.audit({ at: 4, source: 'web', provider: 'notes', action: 'read', outcome: 'succeeded', count: 1, target: 'Personal' });
+    const audit = store.queryAudit({ clientId: one, provider: 'notes', limit: 1, offset: 1 });
+    assert.equal(audit.total, 2);
+    assert.deepEqual(audit.items.map((event) => event.at), [1]);
+    const webAudit = store.queryAudit({ source: 'web', limit: 10 });
+    assert.equal(webAudit.total, 1);
+    assert.deepEqual(webAudit.items[0], { at: 4, source: 'web', provider: 'notes', action: 'read', outcome: 'succeeded', count: 1, target: 'Personal' });
+    store.db.prepare(`INSERT INTO operations(id,client_id,provider,key_hash,request_hash,policy_version,state,expires_at,created_at)
+      VALUES('one',?,'notes','k1','r1',1,'prepared',10,2),('two',?,'reminders','k2','r2',1,'succeeded',10,3)`).run(one, two);
+    const operations = store.queryOperations({ provider: 'notes', limit: 10 });
+    assert.equal(operations.total, 1);
+    assert.equal(operations.items[0]?.id, 'one');
+  } finally { store.close(); }
+});
+
+test('storage diagnostics expose counts and metadata-only recent errors', () => {
+  const store = new Store(':memory:');
+  try {
+    store.audit({ at: 2, clientId: 'client', provider: 'reminders', action: 'create', outcome: 'outcome_unknown', count: 1, errorCode: 'outcome_unknown' });
+    const diagnostics = store.diagnostics();
+    assert.ok(diagnostics.pageSize > 0);
+    assert.ok(diagnostics.pageCount > 0);
+    assert.ok(diagnostics.freePages >= 0);
+    assert.deepEqual(diagnostics.operationsByState, {});
+    assert.deepEqual(diagnostics.recentErrors, [{ at: 2, provider: 'reminders', action: 'create', errorCode: 'outcome_unknown' }]);
+    assert.equal(JSON.stringify(diagnostics).includes('client'), false);
+  } finally { store.close(); }
+});
+
 test('v1 databases migrate operations to an explicit reminders provider', () => {
   const root = mkdtempSync(join(tmpdir(), 'apple-connector-v1-'));
   const path = join(root, 'connector.sqlite');
@@ -74,7 +164,7 @@ test('v1 databases migrate operations to an explicit reminders provider', () => 
     const store = new Store(path);
     try {
       assert.equal(store.operationProvider('op'), 'reminders');
-      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 2);
+      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
     } finally { store.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

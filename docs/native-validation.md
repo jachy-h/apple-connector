@@ -21,6 +21,7 @@ node dist/src/cli/index.js doctor --probe
 | 全天/日期-only | 内存对象 allDay=true；NSDateComponents 的 hour 未指定 | 不代表同步后的日期、时区行为 |
 | recurrence API | 公开 EKCalendarItem.h 有 recurrenceRules，内存对象 hasRecurrenceRules=false | 未验证真实重复提醒识别 |
 | 专用容器 CRUD | `Agents` 日历、提醒列表和 Notes 文件夹中各创建、限定范围重读并删除一个 UUID 标记的测试对象 | 不代表既有对象编辑、共享/重复判定或生产 adapter 已开放 |
+| Reminders M1 更新/完成探针 | 已实现为仅处理新建 UUID 探针的稳定 ID 更新、完成、回读与删除路径；本机执行在原生时限内未返回 | 未得到可验证结果时必须按 unknown 对待，不能开放既有提醒更新或完成 |
 | Notes 正式 reader | 正式 writer 创建后，正式 reader 的 folder list、get、title search 与按 ID 清理在 `Agents` 文件夹通过 | 不代表共享/锁定笔记或其他文件夹可读 |
 | EventKit 日历枚举 | 同一 `osascript` 进程报告 Calendar full access（4），但 `calendarsForEntityType` 中找不到 `Agents` | 授权状态不能替代真实运行时访问验证；当前不能用 EventKit 稳定事件 ID 替换 Apple Events 路径 |
 
@@ -48,9 +49,9 @@ node dist/src/cli/index.js doctor --probe
 | EventKit 首次授权请求、异步回调与拒绝恢复 | 未执行（当前验证走 Calendar/Reminders Apple Events） |
 | Notes Automation 首次授权与拒绝 | 已在创建/重读/删除路径中成功；拒绝恢复未执行 |
 | 指定容器中查询/创建/重读核验 | 已通过：三类 `Agents` 容器各有一次创建、限定范围重读与删除 |
-| 既有普通事件和提醒的受限编辑 | 未执行 |
+| 既有普通事件和提醒的受限编辑 | 未执行；Reminders 自清理 M1 探针在本机超时，待 scoped 对账 |
 | 重复、共享、只读、锁定对象拒绝 | 未执行 |
-| Apple App 超时但实际写入完成的对账 | 未执行 |
+| Apple App 超时但实际写入完成的对账 | 已复现：M0/M1 返回超时后，Reminders UI 可见 UUID 对象；按 UUID 精确清理并按稳定 ID 回读通过 |
 | DST、跨时区、日期-only 保存后往返 | 未执行 |
 | Notes 简单 HTML/纯文本创建后往返 | 未执行 |
 | 终端启动 vs MCP 客户端启动的权限归属 | 未执行 |
@@ -59,6 +60,16 @@ node dist/src/cli/index.js doctor --probe
 | Intel 与其他 macOS 版本 | 未执行 |
 
 真实测试只操作明确授权的测试容器和明确标注的测试对象，不自动全库枚举、不修改用户已有内容、不重置 TCC、不删除系统或用户数据。测试清理也必须有明确对象范围。
+
+2026-09-06：M1 探针改为由调用方在写入前保留 UUID，以便 unknown outcome 后精确恢复。早期恢复只查原始标题，曾对 `5f79e1ab-7e5f-43a5-973a-156114c5843e` 错误返回 `removed: false`；界面复核证明该对象已改名且仍存在。v0.2.0 恢复实现同时精确匹配原始/更新标题、优先使用稳定 ID、拒绝歧义，并在删除后按稳定 ID 回读。
+
+## 2026-09-06 v0.2.0 原生复核
+
+- 旧合并 M1 探针一次完整通过，耗时 52.82 秒；M0 同轮耗时 16.97 秒。
+- 后续 M0 在 60 秒超时；分阶段 M1 的 `create` 在 30 秒超时，随后 UUID 精确清理也曾在 60 秒超时。界面检查发现写入实际已发生，因此这些调用必须保持 `outcome_unknown`，不能自动重放。
+- 界面确认 5 个 M1 与 1 个 M0 未完成诊断对象。5 个 M1 由新恢复路径逐个返回 `removed_verified`，M0 由新增 UUID 恢复路径返回 `removed_verified`。Agents 清单当前未完成对象为 0；另有 1 个隐藏的已完成 M1 搜索结果尚未取得 UUID，保留人工核验，不做宽泛删除。
+- Calendar Apple Events 在 `Agents` 日历创建、限定范围回读和清理通过（1.30 秒）；读取和唯一名称定位通过。EventKit 稳定标识探针返回 `unsupported_operation`，因此 Calendar 服务写入仍关闭。
+- Reminders EventKit 只读对照能以现有 Apple Events 清单 ID 唯一定位 `Agents`，并报告 `allowsContentModifications=true`。这为绕开 Apple Events 阻塞提供了可行方向，但尚未验证真实 reminder 稳定 ID、重复规则与共享清单判定，不能据此开放修改。
 
 ## 专用测试范围确认
 

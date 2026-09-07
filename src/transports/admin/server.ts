@@ -26,8 +26,8 @@ export interface AdminWebServerOptions { facade: ServiceFacade; staticRoot: stri
  */
 export class AdminWebServer {
   private readonly server: Server;
-  private bootstrap: string | undefined = randomBytes(32).toString('base64url');
-  private readonly bootstrapExpiresAt = Date.now() + BOOTSTRAP_TTL_MS;
+  private bootstrap: string | undefined;
+  private bootstrapExpiresAt = 0;
   private readonly sessions = new Map<string, Session>();
   private port: number | undefined;
 
@@ -48,7 +48,15 @@ export class AdminWebServer {
 
   managementUrl(): string {
     if (!this.port) throw new ConnectorError('service_unavailable', 'Management site is not running.');
-    if (!this.bootstrap) throw new ConnectorError('service_unavailable', 'Management link was already used; restart the service to issue a new link.');
+    if (!this.bootstrap || Date.now() > this.bootstrapExpiresAt) return this.issueManagementUrl();
+    return `http://127.0.0.1:${this.port}/?bootstrap=${encodeURIComponent(this.bootstrap)}`;
+  }
+
+  /** Issue a fresh one-time login link without disturbing existing browser sessions. */
+  issueManagementUrl(): string {
+    if (!this.port) throw new ConnectorError('service_unavailable', 'Management site is not running.');
+    this.bootstrap = randomBytes(32).toString('base64url');
+    this.bootstrapExpiresAt = Date.now() + BOOTSTRAP_TTL_MS;
     return `http://127.0.0.1:${this.port}/?bootstrap=${encodeURIComponent(this.bootstrap)}`;
   }
 

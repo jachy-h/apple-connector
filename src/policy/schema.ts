@@ -13,6 +13,9 @@ export const grantSchema = z.object({
   if (grant.fields === 'busy' && (grant.provider !== 'calendar' || grant.actions.some((action) => action !== 'read'))) {
     context.addIssue({ code: 'custom', message: 'Busy grants are calendar read-only.' });
   }
+  if (grant.provider === 'notes' && grant.actions.some((action) => action !== 'read')) {
+    context.addIssue({ code: 'custom', message: 'Notes is read-only.' });
+  }
 });
 export type Grant = z.infer<typeof grantSchema>;
 

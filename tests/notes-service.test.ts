@@ -1,37 +1,27 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { appVersion } from '../src/application/version.js';
-import { NoteOperations } from '../src/operations/notes.js';
 import { ReminderOperations } from '../src/operations/reminders.js';
 import { Store } from '../src/storage/database.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
-import { m0GateNoteWriter, m0GateWriter } from '../src/transports/local/service.js';
+import { m0GateWriter } from '../src/transports/local/service.js';
 import { JxaNoteReader } from '../src/providers/notes/jxa-reader.js';
 import { JxaRunner } from '../src/jxa/runner.js';
 import { JxaReminderReader } from '../src/providers/reminders/jxa-reader.js';
 import { JxaCalendarReader } from '../src/providers/calendar/jxa-reader.js';
 
-test('service routes Notes plans through authorization and preserves them when the M0 gate rejects execution', async () => {
+test('service rejects Notes plans because Notes is read-only', async () => {
   const store = new Store(':memory:');
   const now = Date.now();
   try {
-    const { token } = store.createClient({ name: 'Notes client', grants: [{ provider: 'notes', containerIds: ['Agents'], actions: ['create'], approval: 'automatic', expiresAt: now + 3600_000 }] });
-    const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter, () => now), 'admin', appVersion,
-      new NoteOperations(store, m0GateNoteWriter, () => now));
+    const { token } = store.createClient({ name: 'Notes client', grants: [{ provider: 'notes', containerIds: ['Agents'], actions: ['read'], approval: 'automatic', expiresAt: now + 3600_000 }] });
+    const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter, () => now), 'admin', appVersion);
     const prepared = await facade.agent('operations.prepare', {
       idempotencyKey: 'notes-service', change: { kind: 'notes.create', containerId: 'Agents', title: 'M0 gated note', body: 'private' },
     }, token);
-    assert.equal(prepared.ok, true);
-    if (!prepared.ok) throw new Error('Expected plan');
-    const plan = prepared.result as { id: string; state: string };
-    assert.equal(plan.state, 'approved');
-    const committed = await facade.agent('operations.commit', { id: plan.id }, token);
-    assert.equal(committed.ok, false);
-    if (!committed.ok) assert.equal(committed.error.code, 'service_unavailable');
-    const current = await facade.agent('operations.get', { id: plan.id }, token);
-    assert.equal(current.ok, true);
-    if (current.ok) assert.equal((current.result as { state: string }).state, 'approved');
-    assert.equal(JSON.stringify(store.listOperations()).includes('private'), false);
+    assert.equal(prepared.ok, false);
+    if (!prepared.ok) assert.equal(prepared.error.code, 'unsupported_operation');
+    assert.equal(store.listOperations().length, 0);
   } finally { store.close(); }
 });
 
