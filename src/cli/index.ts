@@ -6,7 +6,8 @@ import { JxaRunner } from '../jxa/runner.js';
 import { HttpServiceClient } from '../transports/local/client.js';
 import { health, issueManagementUrl, setup, startForegroundService, startService, status, stopService } from '../transports/local/lifecycle.js';
 import { spawn } from 'node:child_process';
-import { readAdminToken, statePaths } from '../transports/local/paths.js';
+import { readAdminToken, statePaths, writeClientToken } from '../transports/local/paths.js';
+import { resolve } from 'node:path';
 import { runMcpEntry } from '../transports/mcp/index.js';
 import { runJournaledReminderM1Diagnostic, recoverJournaledReminderM1Diagnostic } from '../application/diagnostic-journal.js';
 import type { RpcMethod } from '../transports/local/rpc.js';
@@ -55,14 +56,16 @@ Usage: apple-connector <command>
   client create        Pair a client (--name <name> --grant <json>, repeatable)
                       Grant: provider, containerIds, actions, fields, approval, expiresAt
                       (expiresAt is Unix epoch milliseconds, the Date.now() scale)
+                      Optional --credential-file <absolute-path> stores its token as 0600
   client revoke        Revoke a client (--id <client-id>)
   client update        Replace name/access (--id <id> --name <name> --grant <json>, repeatable)
   client rotate        Rotate a client credential (--id <client-id>; replacement shown once)
-  mcp                  Run the stdio MCP entry (requires APPLE_CONNECTOR_TOKEN)
+  mcp                  Run the stdio MCP entry (requires APPLE_CONNECTOR_TOKEN_FILE)
+  mcp config           Print a stdio MCP configuration; does not edit an agent configuration
   open                 Open the local management interface (requires a running service)
   doctor [--probe]     Inspect runtime; --probe checks JXA/EventKit without personal-data access
   doctor --containers <name>
-                       Find IDs of exactly named Reminders lists/Notes folders; no item content is read
+                       Find IDs of exactly named Reminders lists; no item content is read
   doctor --reminders-m1 <list-id>
                        Run a UUID-journaled create/update/complete/cleanup diagnostic in one test list
   doctor --reminders-m1-recover <probe-uuid>
@@ -142,7 +145,12 @@ management:    ${s.running ? (s.managementAddress ?? 'starting') : 'stopped (run
         args.forEach((arg, i) => { if (arg === '--grant' && args[i + 1]) grants.push(JSON.parse(args[i + 1] as string)); });
         if (!grants.length) throw new Error('client create requires at least one --grant <json>');
         const created = (await admin('clients.create', { name, grants })) as { client: { id: string; name: string }; token: string };
-        console.log(`Client "${created.client.name}" ${created.client.id}
+        const credentialFile = flagValue('--credential-file');
+        if (credentialFile) {
+          if (credentialFile !== resolve(credentialFile)) throw new Error('client create --credential-file must be an absolute path');
+          writeClientToken(credentialFile, created.token);
+          console.log(`Client "${created.client.name}" ${created.client.id}\nCredential saved to ${credentialFile} (owner-only).`);
+        } else console.log(`Client "${created.client.name}" ${created.client.id}
 Token (shown once, keep it in the agent environment):
 ${created.token}`);
       } else if (sub === 'revoke') {
@@ -167,10 +175,25 @@ ${created.token}`);
       break;
     }
 
-    case 'mcp':
-      if (args.length) throw new Error('Unexpected arguments');
-      await runMcpEntry();
+    case 'mcp': {
+      const sub = args[0];
+      if (sub === 'config') {
+        const credentialFile = flagValue('--token-file');
+        if (!credentialFile) throw new Error('mcp config requires --token-file <absolute-path>');
+        if (credentialFile !== resolve(credentialFile)) throw new Error('mcp config --token-file must be an absolute path');
+        if (args.length !== 3 || args[1] !== '--token-file') throw new Error('Unexpected arguments');
+        // argv[1] and execPath are absolute in normal Node invocation. Resolving preserves the
+        // contract for packaged wrappers too, without depending on a login-shell PATH.
+        console.log(JSON.stringify({ mcpServers: { 'apple-connector': {
+          command: process.execPath, args: [resolve(process.argv[1] ?? '') , 'mcp'],
+          env: { APPLE_CONNECTOR_TOKEN_FILE: credentialFile, APPLE_CONNECTOR_STATE_DIR: statePaths().dir },
+        } } }, null, 2));
+      } else {
+        if (args.length) throw new Error('Unexpected arguments');
+        await runMcpEntry();
+      }
       break;
+    }
 
     case 'open': {
       if (args.length && !(args.length === 1 && args[0] === '--print')) throw new Error('Unexpected arguments');
@@ -201,7 +224,7 @@ ${created.token}`);
       console.log(JSON.stringify({
         version: appVersion, platform: process.platform, arch: process.arch,
         node: process.version, native, capabilities: capabilities(),
-        note: containerName ? 'Container discovery returns metadata only; it does not read reminder or note content.'
+        note: containerName ? 'Container discovery returns Reminders metadata only; it does not read item content.'
           : remindersM1List || recoveryProbeId ? 'The diagnostic journal is retained for exact recovery and contains no reminder body.'
           : 'Bridge visibility does not establish data access, permission attribution or write safety.',
       }, null, 2));

@@ -23,12 +23,12 @@ const containerSchema = z.object({ containerId: z.string().min(1).max(512) }).st
 const probeSchema = z.object({ probeId: z.string().uuid() }).strict();
 const permissionRequestSchema = z.object({ provider: z.enum(['calendar', 'reminders']) }).strict();
 const containerNameSchema = z.object({ name: z.string().trim().min(1).max(500) }).strict();
-const readSummarySchema = z.object({ clientId: z.string().uuid(), provider: z.enum(['reminders', 'notes']), containerId: z.string().min(1).max(512), limit: z.number().int().min(1).max(20).default(10) }).strict();
+const readSummarySchema = z.object({ clientId: z.string().uuid(), provider: z.literal('reminders'), containerId: z.string().min(1).max(512), limit: z.number().int().min(1).max(20).default(10) }).strict();
 const webCalendarSchema = z.object({ calendarId: z.string().trim().min(1).max(512), from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict().superRefine((value, context) => { if (Date.parse(value.to) <= Date.parse(value.from)) context.addIssue({ code: 'custom', message: 'Time range must be increasing.' }); });
 const webReminderSchema = z.object({ listId: z.string().trim().min(1).max(512), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict();
-const webNoteSearchSchema = z.object({ folderId: z.string().trim().min(1).max(512), query: z.string().max(500), limit: z.number().int().min(1).max(100).default(50) }).strict();
-const webNoteGetSchema = z.object({ folderId: z.string().trim().min(1).max(512), id: z.string().trim().min(1).max(512) }).strict();
 const webWriteSchema = z.object({ idempotencyKey: z.string().uuid(), change: z.unknown() }).strict();
+const notesMethod = (method: RpcMethod) => method.startsWith('notes.') || method.startsWith('web.notes.');
+const notesUnavailable = () => new ConnectorError('unsupported_operation', 'Apple Notes is temporarily unavailable in v0.7.0.');
 
 export interface ManagementDiagnostics {
   startReminderM1(containerId: string): { probeId: string; containerId: string; createdAt: number };
@@ -47,8 +47,8 @@ export class ServiceFacade {
     private readonly operations: ReminderOperations,
     private readonly adminToken: string,
     private readonly version: string,
-    private readonly notes?: NoteOperations,
-    private readonly noteReader?: JxaNoteReader,
+    _notes?: NoteOperations,
+    _noteReader?: JxaNoteReader,
     private readonly reminderReader?: ReminderReader,
     private readonly calendarReader?: CalendarReader,
     private readonly issueManagementLink?: () => string,
@@ -56,10 +56,6 @@ export class ServiceFacade {
     private readonly webWrites?: WebWrites,
   ) {}
 
-  private reader(): JxaNoteReader {
-    if (!this.noteReader) throw new ConnectorError('service_unavailable', 'Notes reader is not configured.');
-    return this.noteReader;
-  }
   private remindersReader(): ReminderReader {
     if (!this.reminderReader) throw new ConnectorError('service_unavailable', 'Reminders reader is not configured.');
     return this.reminderReader;
@@ -94,15 +90,12 @@ export class ServiceFacade {
     throw new ConnectorError('permission_denied', 'Operation is outside the granted scope.');
   }
 
-  private noteOperation(id: string): NoteOperations {
-    if (!this.notes) throw new ConnectorError('unsupported_operation', 'Notes operations are not configured.');
-    if (this.store.operationProvider(id) !== 'notes') throw new ConnectorError('unsupported_operation', 'Operation belongs to a different provider.');
-    return this.notes;
-  }
-
   /** Agent-facing requests carry a client bearer token. */
   async agent(method: RpcMethod, params: unknown, token: string): Promise<RpcResponse> {
     try {
+      // Legacy callers receive a stable refusal after credentials are checked, before any
+      // Notes adapter, authorization scope, or native process can be reached.
+      if (notesMethod(method)) { this.store.authenticate(token); throw notesUnavailable(); }
       if (!agentMethods.has(method)) throw new ConnectorError('permission_denied', 'Management method is not available to agents.');
       this.store.authenticate(token);
       switch (method) {
@@ -134,36 +127,22 @@ export class ServiceFacade {
           const client = this.store.authenticate(token); await this.reminderGrant(client, parsed.listId);
           return rpcOk(await this.remindersReader().list(parsed.listId, parsed.offset, parsed.limit));
         }
-        case 'notes.list_folders': {
-          const client = this.store.authenticate(token);
-          const ids = [...new Set(client.grants.filter((grant) => grant.provider === 'notes' && grant.actions.includes('read') && grant.expiresAt > Date.now())
-            .flatMap((grant) => grant.containerIds))];
-          return rpcOk(await this.reader().listFolders(ids));
-        }
-        case 'notes.get': {
-          const parsed = z.object({ folderId: z.string().min(1).max(512), id: z.string().min(1).max(512) }).strict().parse(params);
-          const client = this.store.authenticate(token); authorize(client, 'notes', parsed.folderId, 'read');
-          return rpcOk(await this.reader().get(parsed.folderId, parsed.id));
-        }
-        case 'notes.search': {
-          const parsed = z.object({ folderId: z.string().min(1).max(512), query: z.string().max(500), limit: z.number().int().min(1).max(100).default(50) }).strict().parse(params);
-          const client = this.store.authenticate(token); authorize(client, 'notes', parsed.folderId, 'read');
-          return rpcOk(await this.reader().search(parsed.folderId, parsed.query, parsed.limit));
-        }
         case 'operations.prepare': {
           const change = params && typeof params === 'object' ? (params as { change?: { kind?: unknown } }).change : undefined;
-          if (change?.kind === 'notes.create') throw new ConnectorError('unsupported_operation', 'Notes is read-only in v0.5.0.');
+          if (change?.kind === 'notes.create') throw notesUnavailable();
           return rpcOk(this.operations.prepare(token, params));
         }
         case 'operations.commit': {
           const { id } = operationRefParamsSchema.parse(params);
           this.store.authenticate(token);
-          return rpcOk(await (this.store.operationProvider(id) === 'notes' ? this.noteOperation(id).commit(token, id) : this.operations.commit(token, id)));
+          if (this.store.operationProvider(id) === 'notes') throw notesUnavailable();
+          return rpcOk(await this.operations.commit(token, id));
         }
         case 'operations.get': {
           const { id } = operationRefParamsSchema.parse(params);
           this.store.authenticate(token);
-          return rpcOk(this.store.operationProvider(id) === 'notes' ? this.noteOperation(id).get(token, id) : this.operations.get(token, id));
+          if (this.store.operationProvider(id) === 'notes') throw notesUnavailable();
+          return rpcOk(this.operations.get(token, id));
         }
       }
       throw new ConnectorError('invalid_request', 'Unhandled agent method.');
@@ -173,8 +152,9 @@ export class ServiceFacade {
   /** Management requests require the local admin token held by setup/CLI/web. */
   async admin(method: RpcMethod, params: unknown, token: string): Promise<RpcResponse> {
     try {
-      if (!localAdminMethods.has(method)) throw new ConnectorError('permission_denied', 'Agent method cannot be called with admin credentials.');
       if (!safeEqualToken(token, this.adminToken)) throw new ConnectorError('permission_denied', 'Invalid admin session.');
+      if (notesMethod(method)) throw notesUnavailable();
+      if (!localAdminMethods.has(method)) throw new ConnectorError('permission_denied', 'Agent method cannot be called with admin credentials.');
       return await this.runAdmin(method, params);
     } catch (error) { return rpcFail(error); }
   }
@@ -182,6 +162,7 @@ export class ServiceFacade {
   /** Only AdminWebServer calls this after its loopback session, Host and CSRF checks. */
   async management(method: RpcMethod, params: unknown): Promise<RpcResponse> {
     try {
+      if (notesMethod(method)) throw notesUnavailable();
       if (!adminMethods.has(method)) throw new ConnectorError('permission_denied', 'Agent method is not available to management.');
       return await this.runAdmin(method, params);
     } catch (error) { return rpcFail(error); }
@@ -206,7 +187,8 @@ export class ServiceFacade {
         }
         case 'operations.approve': {
           const { id } = operationRefParamsSchema.parse(params);
-          if (this.store.operationProvider(id) === 'notes') this.noteOperation(id).approve(id); else this.operations.approve(id);
+          if (this.store.operationProvider(id) === 'notes') throw notesUnavailable();
+          this.operations.approve(id);
           return rpcOk({ approved: id });
         }
         case 'operations.reject': {
@@ -216,6 +198,7 @@ export class ServiceFacade {
         }
         case 'operations.preview': {
           const { id } = operationRefParamsSchema.parse(params);
+          if (this.store.operationProvider(id) === 'notes') throw notesUnavailable();
           return rpcOk(this.store.operationPreview(id));
         }
         case 'audit.list': return rpcOk(this.store.auditEvents());
@@ -270,9 +253,7 @@ export class ServiceFacade {
           const client = this.store.client(parsed.data.clientId);
           if (client.revoked) throw new ConnectorError('permission_denied', 'The selected client is revoked.');
           authorize(client, parsed.data.provider, parsed.data.containerId, 'read');
-          const result = parsed.data.provider === 'reminders'
-            ? await this.remindersReader().list(parsed.data.containerId, 0, parsed.data.limit)
-            : await this.reader().search(parsed.data.containerId, '', parsed.data.limit);
+          const result = await this.remindersReader().list(parsed.data.containerId, 0, parsed.data.limit);
           const count = Array.isArray(result) ? result.length : result.items.length;
           this.store.audit({ at: Date.now(), clientId: client.id, provider: parsed.data.provider, action: 'read', outcome: 'allowed', count, policyVersion: client.policyVersion });
           return rpcOk({ provider: parsed.data.provider, containerId: parsed.data.containerId, count, ...(Array.isArray(result) || result.nextOffset === null ? {} : { nextOffset: result.nextOffset }), limitedTo: parsed.data.limit, contentReturned: false });
@@ -330,30 +311,6 @@ export class ServiceFacade {
             if (error instanceof ConnectorError && error.code === 'unsupported_operation') {
               throw new ConnectorError('unsupported_operation', '无法解析此提醒事项清单 ID。请先按精确名称发现，再选择“使用此 ID”后重试。');
             }
-            throw error;
-          }
-        }
-        case 'web.notes.search': {
-          const parsed = webNoteSearchSchema.parse(params);
-          const startedAt = Date.now();
-          try {
-            const result = await this.reader().search(parsed.folderId, parsed.query, parsed.limit);
-            this.store.audit({ at: Date.now(), source: 'web', provider: 'notes', action: 'read', outcome: 'succeeded', count: result.length, target: parsed.folderId, durationMs: Date.now() - startedAt });
-            return rpcOk(result);
-          } catch (error) {
-            this.store.audit({ at: Date.now(), source: 'web', provider: 'notes', action: 'read', outcome: 'failed', count: 0, target: parsed.folderId, durationMs: Date.now() - startedAt, errorCode: 'service_unavailable' });
-            throw error;
-          }
-        }
-        case 'web.notes.get': {
-          const parsed = webNoteGetSchema.parse(params);
-          const startedAt = Date.now();
-          try {
-            const result = await this.reader().get(parsed.folderId, parsed.id);
-            this.store.audit({ at: Date.now(), source: 'web', provider: 'notes', action: 'read', outcome: 'succeeded', count: 1, target: parsed.folderId, durationMs: Date.now() - startedAt });
-            return rpcOk(result);
-          } catch (error) {
-            this.store.audit({ at: Date.now(), source: 'web', provider: 'notes', action: 'read', outcome: 'failed', count: 0, target: parsed.folderId, durationMs: Date.now() - startedAt, errorCode: 'service_unavailable' });
             throw error;
           }
         }

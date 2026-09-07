@@ -22,7 +22,11 @@ export type Grant = z.infer<typeof grantSchema>;
 export const clientInputSchema = z.object({
   name: z.string().trim().min(1).max(100),
   grants: z.array(grantSchema).max(30),
-}).strict();
+}).strict().superRefine((client, context) => {
+  if (client.grants.some((grant) => grant.provider === 'notes')) {
+    context.addIssue({ code: 'custom', message: 'Notes is temporarily unavailable in v0.7.0 and cannot be granted.' });
+  }
+});
 export type ClientInput = z.infer<typeof clientInputSchema>;
 
 export interface Client {

@@ -34,7 +34,7 @@ test('client policy edits cancel pending plans and credential rotation invalidat
     const created = store.createClient({ name: 'Before', grants: [{ provider: 'reminders', containerIds: ['one'], actions: ['create'], expiresAt: Date.now() + 60_000 }] });
     store.db.prepare(`INSERT INTO operations(id,client_id,provider,key_hash,request_hash,policy_version,state,payload,expires_at,created_at)
       VALUES('pending',?,'reminders','key','request',1,'approved','{}',?,?)`).run(created.client.id, Date.now() + 60_000, Date.now());
-    const updated = store.updateClient(created.client.id, { name: 'After', grants: [{ provider: 'notes', containerIds: ['two'], actions: ['read'], expiresAt: Date.now() + 60_000 }] });
+    const updated = store.updateClient(created.client.id, { name: 'After', grants: [{ provider: 'reminders', containerIds: ['two'], actions: ['read'], expiresAt: Date.now() + 60_000 }] });
     assert.equal(updated.name, 'After');
     assert.equal(updated.policyVersion, 2);
     assert.equal(store.db.prepare("SELECT state FROM operations WHERE id='pending'").get()?.state, 'cancelled');
@@ -170,7 +170,7 @@ test('management routes reminder update and delete requests to Web writes', asyn
   } finally { store.close(); }
 });
 
-test('management Web endpoints read through session-only methods and emit isolated audit events', async () => {
+test('management rejects legacy Notes Web endpoints before a reader or audit event', async () => {
   const store = new Store(':memory:');
   const reminderOps = new ReminderOperations(store, { preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true });
   const facade = new ServiceFacade(store, reminderOps, 'admin', 'test', undefined,
@@ -179,9 +179,10 @@ test('management Web endpoints read through session-only methods and emit isolat
     { listEvents: async (calendarId: string) => ({ items: [{ calendarId, title: 'private', start: '2026-01-01T00:00:00.000Z', end: '2026-01-01T01:00:00.000Z', allDay: false, location: '', notes: '' }], nextOffset: null }) } as never);
   try {
     const response = await facade.management('web.notes.search', { folderId: 'folder', query: 'x', limit: 50 });
-    assert.equal(response.ok, true);
+    assert.equal(response.ok, false);
+    if (!response.ok) assert.equal(response.error.code, 'unsupported_operation');
     const audit = store.queryAudit({ source: 'web' });
-    assert.equal(audit.total, 1); assert.equal(audit.items[0]?.provider, 'notes'); assert.equal(JSON.stringify(audit).includes('private'), false);
+    assert.equal(audit.total, 0); assert.equal(JSON.stringify(audit).includes('private'), false);
     const denied = await facade.agent('web.notes.search', { folderId: 'folder', query: 'x' }, 'not-a-client-token');
     assert.equal(denied.ok, false);
   } finally { store.close(); }

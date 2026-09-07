@@ -5,7 +5,6 @@ import { ConnectorError } from '../../application/errors.js';
 import { runMaintenance, scheduleMaintenance } from '../../application/maintenance.js';
 import { Store } from '../../storage/database.js';
 import { ReminderOperations } from '../../operations/reminders.js';
-import { JxaNoteReader } from '../../providers/notes/jxa-reader.js';
 import { EventKitReminderProvider } from '../../providers/reminders/eventkit.js';
 import { EventKitCalendarReader } from '../../providers/calendar/eventkit.js';
 import { ServiceFacade } from './handlers.js';
@@ -74,7 +73,7 @@ const managedDiagnostics = {
   },
 };
 let management: AdminWebServer;
-const facade = new ServiceFacade(store, operations, adminToken, appVersion, undefined, new JxaNoteReader(), reminderWriter, calendarProvider, () => management.issueManagementUrl(), managedDiagnostics, webWrites);
+const facade = new ServiceFacade(store, operations, adminToken, appVersion, undefined, undefined, reminderWriter, calendarProvider, () => management.issueManagementUrl(), managedDiagnostics, webWrites);
 const server = LocalServer.create({ socketPath: paths.socket, facade });
 management = new AdminWebServer({ facade, staticRoot: fileURLToPath(new URL('../../../web', import.meta.url)) });
 

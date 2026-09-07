@@ -1,9 +1,9 @@
 import type { Capability } from '../types.js';
 
 export const notesCapability: Capability = {
-  provider: 'notes', backend: 'apple-events', status: 'available', operations: ['list_folders', 'get', 'search'],
+  provider: 'notes', backend: 'apple-events', status: 'unavailable', operations: [],
   limitations: [
-    'Reads are limited to explicitly granted non-shared folders; locked and shared notes are excluded.',
-    'Notes is read-only; creation, update and deletion are unavailable.',
+    'Apple Notes is temporarily disabled in v0.7.0.',
+    'Existing grants, audit events, and operation metadata remain readable but do not authorize native access.',
   ],
 };

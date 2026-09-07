@@ -43,12 +43,6 @@ export function createMcpServer(client: ServiceClient, token: string): McpServer
   });
 
 
-  mcp.registerTool('notes.list_folders', {
-    description: 'List only the Notes folders explicitly granted to this client. Shared folders are omitted.', inputSchema: {},
-  }, async () => {
-    try { return textResult(await client.request('notes.list_folders', undefined, token)); } catch (error) { return toolError(error); }
-  });
-
   mcp.registerTool('reminders.list_lists', {
     description: 'List only the Reminders lists explicitly granted for reading to this client.', inputSchema: {},
   }, async () => {
@@ -60,19 +54,6 @@ export function createMcpServer(client: ServiceClient, token: string): McpServer
   }, async (args) => {
     try { return textResult(await client.request('reminders.list', args, token)); } catch (error) { return toolError(error); }
   });
-  mcp.registerTool('notes.get', {
-    description: 'Read one ordinary note by ID from an explicitly granted folder. Shared and locked notes are rejected.',
-    inputSchema: { folderId: z.string().min(1).max(512), id: z.string().min(1).max(512) },
-  }, async (args) => {
-    try { return textResult(await client.request('notes.get', args, token)); } catch (error) { return toolError(error); }
-  });
-  mcp.registerTool('notes.search', {
-    description: 'Search note titles within one explicitly granted folder; results contain a bounded plaintext snippet.',
-    inputSchema: { folderId: z.string().min(1).max(512), query: z.string().max(500), limit: z.number().int().min(1).max(100).optional() },
-  }, async (args) => {
-    try { return textResult(await client.request('notes.search', args, token)); } catch (error) { return toolError(error); }
-  });
-
   mcp.registerTool('changes.prepare', {
     description: 'Create an immutable change plan for an allowed reminder list. Committing executes the plan; nothing is written until `changes.commit`.',
     inputSchema: {

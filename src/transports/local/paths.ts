@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -56,6 +56,24 @@ export function loadOrCreateAdminToken(paths: StatePaths): string {
   const token = randomBytes(TOKEN_BYTES).toString('base64url');
   writeFileSync(paths.adminTokenFile, `${token}\n`, { mode: 0o600 });
   chmodSync(paths.adminTokenFile, 0o600);
+  return token;
+}
+
+/** Store an agent credential outside MCP configuration and command-line arguments. */
+export function writeClientToken(file: string, token: string): void {
+  if (!token || /\s/.test(token)) throw new ConnectorError('invalid_request', 'Client credential is invalid.');
+  writeFileSync(file, `${token}\n`, { mode: 0o600, flag: 'wx' });
+  chmodSync(file, 0o600);
+}
+
+/** Read only a regular, owner-private credential file. */
+export function readClientToken(file: string): string {
+  let stat: ReturnType<typeof lstatSync>;
+  try { stat = lstatSync(file); } catch { throw new ConnectorError('invalid_request', 'MCP credential file does not exist.'); }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new ConnectorError('invalid_request', 'MCP credential file must be a regular file.');
+  if ((stat.mode & 0o077) !== 0) throw new ConnectorError('permission_denied', 'MCP credential file must not be accessible by group or other users.');
+  const token = readFileSync(file, 'utf8').trim();
+  if (!token || /\s/.test(token)) throw new ConnectorError('invalid_request', 'MCP credential file is invalid.');
   return token;
 }
 

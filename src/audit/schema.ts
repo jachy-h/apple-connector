@@ -15,7 +15,7 @@ export const auditEventSchema = z.object({
   outcome: z.enum(['allowed', 'denied', 'succeeded', 'failed', 'outcome_unknown']),
   count: z.number().int().nonnegative().max(1000).default(0),
   policyVersion: z.number().int().nonnegative().optional(),
-  errorCode: z.enum(['invalid_request', 'permission_denied', 'conflict', 'timeout', 'outcome_unknown', 'protocol_error', 'service_unavailable', 'approval_required']).optional(),
+  errorCode: z.enum(['invalid_request', 'permission_denied', 'ambiguous_target', 'conflict', 'unsupported_operation', 'timeout', 'outcome_unknown', 'protocol_error', 'service_unavailable', 'approval_required']).optional(),
 }).strict();
 export type AuditEvent = z.infer<typeof auditEventSchema>;
 

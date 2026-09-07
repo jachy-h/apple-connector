@@ -89,17 +89,17 @@ test('malformed envelopes are rejected at the HTTP boundary', async (t) => {
   assert.equal(JSON.parse(missingAuth.body).ok, false);
 });
 
-test('capabilities reports the service version and verified read adapters', async (t) => {
+test('capabilities reports Notes as unavailable with no operations', async (t) => {
   const f = await fixture();
   t.after(() => closeFixture(f));
   const { token } = await pairClient(f);
   const result = await f.agent(token, 'capabilities') as { version: string; capabilities: Array<{ provider: string; status: string; operations: string[] }> };
   assert.equal(result.version, 'test-version');
   assert.deepEqual(result.capabilities.map((c) => c.provider), ['calendar', 'reminders', 'notes']);
-  assert.deepEqual(result.capabilities.map((c) => c.status), ['available', 'available', 'available']);
+  assert.deepEqual(result.capabilities.map((c) => c.status), ['available', 'available', 'unavailable']);
   assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events', 'web_create', 'web_update', 'web_delete']);
   assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create']);
-  assert.deepEqual(result.capabilities[2]?.operations, ['list_folders', 'get', 'search']);
+  assert.deepEqual(result.capabilities[2]?.operations, []);
 });
 
 test('web calendar reads resolve an exact name to an EventKit ID before listing events', async (t) => {

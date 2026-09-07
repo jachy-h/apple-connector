@@ -5,16 +5,16 @@ import { ReminderOperations } from '../src/operations/reminders.js';
 import { Store } from '../src/storage/database.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
 import { m0GateWriter } from '../src/transports/local/service.js';
-import { JxaNoteReader } from '../src/providers/notes/jxa-reader.js';
 import { JxaRunner } from '../src/jxa/runner.js';
 import { JxaReminderReader } from '../src/providers/reminders/jxa-reader.js';
 import { JxaCalendarReader } from '../src/providers/calendar/jxa-reader.js';
 
-test('service rejects Notes plans because Notes is read-only', async () => {
+test('service rejects new Notes grants and plans in v0.7.0', async () => {
   const store = new Store(':memory:');
   const now = Date.now();
   try {
-    const { token } = store.createClient({ name: 'Notes client', grants: [{ provider: 'notes', containerIds: ['Agents'], actions: ['read'], approval: 'automatic', expiresAt: now + 3600_000 }] });
+    assert.throws(() => store.createClient({ name: 'Notes client', grants: [{ provider: 'notes', containerIds: ['Agents'], actions: ['read'], approval: 'automatic', expiresAt: now + 3600_000 }] }), /temporarily unavailable/);
+    const { token } = store.createClient({ name: 'Reminders client', grants: [{ provider: 'reminders', containerIds: ['Agents'], actions: ['read'], approval: 'automatic', expiresAt: now + 3600_000 }] });
     const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter, () => now), 'admin', appVersion);
     const prepared = await facade.agent('operations.prepare', {
       idempotencyKey: 'notes-service', change: { kind: 'notes.create', containerId: 'Agents', title: 'M0 gated note', body: 'private' },
@@ -68,25 +68,17 @@ test('service scopes Calendar reads to unique granted names and applies busy pro
   } finally { store.close(); }
 });
 
-test('service derives Notes folder listing from grants and reauthorizes get/search scopes', async () => {
+test('legacy Notes grants are retained but legacy requests never call a Notes reader', async () => {
   const store = new Store(':memory:');
   try {
-    const { token } = store.createClient({ name: 'Reader', grants: [{ provider: 'notes', containerIds: ['allowed'], actions: ['read'], expiresAt: Date.now() + 3600_000 }] });
-    const reader = new JxaNoteReader(new JxaRunner(async (request) => {
-      const envelope = JSON.parse(request.input) as { operation: string; requestId: string; payload: Record<string, unknown> };
-      const result = envelope.operation === 'notes.listFolders' ? [{ id: 'allowed', name: 'Agents' }]
-        : envelope.operation === 'notes.get' ? { id: 'n', folderId: 'allowed', title: 'T', snippet: 'S', body: 'B' }
-        : [{ id: 'n', folderId: 'allowed', title: 'T', snippet: 'S' }];
-      return JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, operation: envelope.operation, ok: true, result });
-    }));
-    const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter), 'admin', appVersion, undefined, reader);
+    const { client, token } = store.createClient({ name: 'Reader', grants: [{ provider: 'reminders', containerIds: ['allowed'], actions: ['read'], expiresAt: Date.now() + 3600_000 }] });
+    store.db.prepare('UPDATE clients SET grants=? WHERE id=?').run(JSON.stringify([{ provider: 'notes', containerIds: ['allowed'], actions: ['read'], fields: 'full', approval: 'automatic', expiresAt: Date.now() + 3600_000 }]), client.id);
+    const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter), 'admin', appVersion);
     const listed = await facade.agent('notes.list_folders', {}, token);
-    assert.equal(listed.ok, true);
-    if (listed.ok) assert.deepEqual(listed.result, [{ id: 'allowed', name: 'Agents' }]);
-    const note = await facade.agent('notes.get', { folderId: 'allowed', id: 'n' }, token);
-    assert.equal(note.ok, true);
-    const denied = await facade.agent('notes.search', { folderId: 'other', query: 'x' }, token);
-    assert.equal(denied.ok, false);
-    if (!denied.ok) assert.equal(denied.error.code, 'permission_denied');
+    assert.equal(listed.ok, false);
+    if (!listed.ok) assert.equal(listed.error.code, 'unsupported_operation');
+    const searched = await facade.agent('notes.search', { folderId: 'allowed', query: 'x' }, token);
+    assert.equal(searched.ok, false);
+    if (!searched.ok) assert.equal(searched.error.code, 'unsupported_operation');
   } finally { store.close(); }
 });

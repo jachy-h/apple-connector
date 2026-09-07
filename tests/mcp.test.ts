@@ -43,12 +43,12 @@ async function harness() {
   return { store, mcp, client, writes: () => writes, token };
 }
 
-test('MCP exposes verified Calendar and Notes read tools alongside change-plan tools', async (t) => {
+test('MCP omits temporarily disabled Notes tools', async (t) => {
   const h = await harness();
   t.after(async () => { await h.client.close(); h.store.close(); });
   const tools = await h.client.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(names, ['calendar.list_calendars', 'calendar.list_events', 'changes.commit', 'changes.prepare', 'connector.capabilities', 'notes.get', 'notes.list_folders', 'notes.search', 'operations.get', 'reminders.list', 'reminders.list_lists']);
+  assert.deepEqual(names, ['calendar.list_calendars', 'calendar.list_events', 'changes.commit', 'changes.prepare', 'connector.capabilities', 'operations.get', 'reminders.list', 'reminders.list_lists']);
 });
 
 test('capabilities tool reports provider statuses without reading personal data', async (t) => {
@@ -60,6 +60,7 @@ test('capabilities tool reports provider statuses without reading personal data'
   const parsed = JSON.parse(text) as { version: string; capabilities: Array<{ provider: string }> };
   assert.equal(parsed.version, 'test-version');
   assert.deepEqual(parsed.capabilities.map((c) => c.provider), ['calendar', 'reminders', 'notes']);
+  assert.deepEqual(parsed.capabilities.at(-1), { provider: 'notes', backend: 'apple-events', status: 'unavailable', operations: [], limitations: ['Apple Notes is temporarily disabled in v0.7.0.', 'Existing grants, audit events, and operation metadata remain readable but do not authorize native access.'] });
 });
 
 test('prepare → commit → get works end to end through MCP with one write', async (t) => {
