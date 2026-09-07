@@ -9,7 +9,7 @@ test('Calendar reader uses explicit unique-name scopes and validates event outpu
     const envelope = JSON.parse(request.input) as { operation: string; requestId: string; payload: Record<string, unknown> };
     calls.push({ operation: envelope.operation, payload: envelope.payload });
     const result = envelope.operation === 'calendar.listCalendars' ? [{ id: 'Agents', name: 'Agents' }] : {
-      items: [{ calendarId: 'Agents', title: 'Planning', start: '2028-02-29T09:00:00+08:00', end: '2028-02-29T10:00:00+08:00', allDay: false, location: 'Room', notes: 'Private' }], nextOffset: null,
+      items: [{ id: 'event-1', calendarId: 'Agents', title: 'Planning', start: '2028-02-29T09:00:00+08:00', end: '2028-02-29T10:00:00+08:00', allDay: false, location: 'Room', notes: 'Private' }], nextOffset: null,
     };
     return JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, operation: envelope.operation, ok: true, result });
   });
@@ -25,7 +25,7 @@ test('Calendar reader uses explicit unique-name scopes and validates event outpu
 test('Calendar reader rejects malformed or cross-container native events', async () => {
   const runner = new JxaRunner(async (request) => {
     const envelope = JSON.parse(request.input) as { operation: string; requestId: string };
-    return JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, operation: envelope.operation, ok: true, result: { items: [{ calendarId: 'other', title: 'x', start: '2028-02-29T10:00:00+08:00', end: '2028-02-29T09:00:00+08:00', allDay: false, location: '', notes: '' }], nextOffset: null } });
+    return JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, operation: envelope.operation, ok: true, result: { items: [{ id: 'event-1', calendarId: 'other', title: 'x', start: '2028-02-29T10:00:00+08:00', end: '2028-02-29T09:00:00+08:00', allDay: false, location: '', notes: '' }], nextOffset: null } });
   });
   await assert.rejects(new JxaCalendarReader(runner).listEvents('Agents', '2028-02-29T00:00:00+08:00', '2028-03-01T00:00:00+08:00'), { code: 'protocol_error' });
 });

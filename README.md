@@ -2,7 +2,7 @@
 
 [中文](README_zh.md)
 
-A local Apple data connector for agents, built with TypeScript, Node.js and JXA. The project is implementing the v0.4.0 Web debugging MVP and is **not ready for distribution**. The local Web page provides Calendar reads plus Notes and Reminders reads/creation; Calendar writes and existing-object mutation remain gated, and Reminders creation is explicitly marked unstable.
+A local Apple data connector for agents, built with TypeScript, Node.js and JXA. The project is implementing the v0.4.0 Web debugging MVP and is **not ready for distribution**. The local Web page provides Calendar reads and scoped event creation/editing/deletion, plus Notes and Reminders reads/creation; Reminders creation is explicitly marked unstable.
 
 ## Development
 
@@ -48,13 +48,13 @@ Notes:
 - The service listens on a Unix domain socket inside the 0700 state directory; agent and management RPC methods are separated by credential class.
 - The management site binds a random `127.0.0.1` port only. Its one-time bootstrap link is exchanged for an HttpOnly, SameSite session and protected by Host, Origin and CSRF checks. `open` never places the persistent administrator token in a URL.
 - Client access can be created and, for one-grant clients, edited as a form from the management site; credentials can be rotated from the management site or CLI. Policy edits cancel unexecuted plans; rotation invalidates the old token immediately.
-- The default management page has only **APPs** and **Audit**. APPs opens Calendar by default, then offers Calendar time-range reads, Reminders list reads/unstable creation, and Notes search/detail/plain-text creation directly through the authenticated local session—no MCP client, token or approval page is required. Web writes use a browser-generated operation UUID for idempotency and status recovery; uncertain outcomes are never auto-retried.
+- The default management page has only **APPs** and **Audit**. APPs opens Calendar by default, then offers Calendar time-range reads and non-recurring event creation/editing/deletion, Reminders list reads/unstable creation, and Notes search/detail/plain-text creation directly through the authenticated local session—no MCP client, token or approval page is required. Web writes use a browser-generated operation UUID for idempotency and status recovery; uncertain outcomes are never auto-retried.
 - Audit shows only Web-debug records, with App/result/time filtering and pagination. It does not retain titles, bodies, tokens or raw native errors. The management service also runs only a fixed, explicitly targeted Reminders M1 diagnostic with a durable UUID journal and exact-cleanup recovery; it never accepts arbitrary shell or JXA input.
-- Verified native creation is enabled for scoped Reminders lists and non-shared Notes folders through the immutable change-plan flow. Calendar writes and existing-object mutations remain gated; unsupported writes return an explicit error rather than pretending success. MCP exposes `connector.capabilities`, uniquely named Calendar reads (`calendar.list_calendars`/`calendar.list_events`), folder-scoped Notes reads (`notes.list_folders`/`notes.get`/`notes.search`), granted Reminders list/page reads (`reminders.list_lists`/`reminders.list`), `changes.prepare`, `changes.commit` and `operations.get`.
+- Verified native creation is enabled for scoped Reminders lists and non-shared Notes folders through the immutable change-plan flow. Calendar changes are limited to the authenticated management page; MCP exposes only uniquely named Calendar reads (`calendar.list_calendars`/`calendar.list_events`), folder-scoped Notes reads (`notes.list_folders`/`notes.get`/`notes.search`), granted Reminders list/page reads (`reminders.list_lists`/`reminders.list`), `changes.prepare`, `changes.commit` and `operations.get`.
 
 ## Scope and evidence
 
-Current code includes the bounded native runner, scoped authorization, SQLite client/audit storage, change-plan state machines, the local service, client pairing, MCP and a loopback-only management UI. Calendar reads are available only when the configured calendar name is unique; Calendar writes, verified native writes and Homebrew distribution are not available yet. A dedicated test container must be explicitly selected before real Apple write tests.
+Current code includes the bounded native runner, scoped authorization, SQLite client/audit storage, change-plan state machines, the local service, client pairing, MCP and a loopback-only management UI. Calendar reads require a uniquely named configured calendar; non-recurring event writes are verified and available only in the authenticated management UI. Homebrew distribution is not available yet. A dedicated test container must be explicitly selected before real Apple write tests.
 
 Pending plans may temporarily contain the content needed for execution. Successful, revoked and uncertain operations clear that content. The running service performs maintenance every minute, expires plans after at most 15 minutes, and retains terminal idempotency records for 30 days. Unknown outcomes are not automatically retried or discarded.
 

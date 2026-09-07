@@ -291,13 +291,32 @@ export class ServiceFacade {
           const parsed = webCalendarSchema.parse(params);
           const startedAt = Date.now();
           try {
-            const result = await this.calendarsReader().listEvents(parsed.calendarId, parsed.from, parsed.to, parsed.offset, parsed.limit);
-            this.store.audit({ at: Date.now(), source: 'web', provider: 'calendar', action: 'read', outcome: 'succeeded', count: result.items.length, target: parsed.calendarId, durationMs: Date.now() - startedAt });
-            return rpcOk(result);
+            // The management UI accepts the human-readable calendar name, whereas EventKit
+            // event predicates require its stable identifier. Resolve exactly once per query.
+            const matches = await this.calendarsReader().listCalendars([parsed.calendarId]);
+            if (matches.length === 0) throw new ConnectorError('unsupported_operation', '没有找到该精确名称的日历。');
+            if (matches.length > 1) throw new ConnectorError('conflict', '找到多个同名日历；请先在日历 App 中改为唯一名称。');
+            const calendar = matches[0]!;
+            const result = await this.calendarsReader().listEvents(calendar.id, parsed.from, parsed.to, parsed.offset, parsed.limit);
+            this.store.audit({ at: Date.now(), source: 'web', provider: 'calendar', action: 'read', outcome: 'succeeded', count: result.items.length, target: calendar.id, durationMs: Date.now() - startedAt });
+            return rpcOk({ calendar, ...result });
           } catch (error) {
-            this.store.audit({ at: Date.now(), source: 'web', provider: 'calendar', action: 'read', outcome: 'failed', count: 0, target: parsed.calendarId, durationMs: Date.now() - startedAt, errorCode: 'service_unavailable' });
+            const errorCode = error instanceof ConnectorError ? error.code : 'service_unavailable';
+            this.store.audit({ at: Date.now(), source: 'web', provider: 'calendar', action: 'read', outcome: 'failed', count: 0, target: parsed.calendarId, durationMs: Date.now() - startedAt, errorCode });
             throw error;
           }
+        }
+        case 'web.calendar.create': {
+          if (!this.webWrites) throw new ConnectorError('service_unavailable', 'Web writes are not configured.');
+          const parsed = webWriteSchema.parse(params); return rpcOk(await this.webWrites.submitCalendarCreate(parsed.idempotencyKey, parsed.change));
+        }
+        case 'web.calendar.update': {
+          if (!this.webWrites) throw new ConnectorError('service_unavailable', 'Web writes are not configured.');
+          const parsed = webWriteSchema.parse(params); return rpcOk(await this.webWrites.submitCalendarUpdate(parsed.idempotencyKey, parsed.change));
+        }
+        case 'web.calendar.delete': {
+          if (!this.webWrites) throw new ConnectorError('service_unavailable', 'Web writes are not configured.');
+          const parsed = webWriteSchema.parse(params); return rpcOk(await this.webWrites.submitCalendarDelete(parsed.idempotencyKey, parsed.change));
         }
         case 'web.reminders.list': {
           const parsed = webReminderSchema.parse(params);

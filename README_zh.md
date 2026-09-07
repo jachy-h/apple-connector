@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-使用 TypeScript、Node.js 和 JXA 构建的本地 Apple 数据连接器，供 agent 使用。目前正在实现 v0.4.0 Web 调试 MVP，**尚不能正式分发**。本地 Web 可直接读取 Calendar，并读取/创建 Notes 与 Reminders；Calendar 写入与既有对象修改仍受门禁保护，Reminders 创建明确标为不稳定。
+使用 TypeScript、Node.js 和 JXA 构建的本地 Apple 数据连接器，供 agent 使用。目前正在实现 v0.4.0 Web 调试 MVP，**尚不能正式分发**。本地 Web 可直接读取、创建、编辑和删除 Calendar 日程，并读取/创建 Notes 与 Reminders；Reminders 创建明确标为不稳定。
 
 ## 开发
 
@@ -48,13 +48,13 @@ node dist/src/cli/index.js stop
 - 服务监听状态目录（0700）内的 Unix domain socket；agent 与管理类 RPC 方法按凭证类别隔离。
 - 管理网页只绑定随机 `127.0.0.1` 端口。一次性 bootstrap 链接会换取 `HttpOnly`、`SameSite` 会话，并受 Host、Origin 与 CSRF 校验保护；`open` 不会把持久管理员 token 放入 URL。
 - 可从管理网页以表单创建或编辑单授权客户端范围，并可在网页或 CLI 轮换凭证。策略编辑会取消尚未执行的计划，轮换会立即使旧 token 失效。
-- 默认管理页一级导航只有 **APPs**、**审计**。APPs 默认进入日历，并可通过已认证本机会话直接执行 Calendar 时间范围读取、Reminders 清单读取/不稳定新增，以及 Notes 搜索/详情/纯文本新增；无需 MCP 客户端、token 或审批页。Web 写入使用浏览器生成的操作 UUID 实现幂等与状态恢复；结果未知绝不自动重试。
+- 默认管理页一级导航只有 **APPs**、**审计**。APPs 默认进入日历，并可通过已认证本机会话直接执行 Calendar 时间范围读取及非重复日程的新建/编辑/删除、Reminders 清单读取/不稳定新增，以及 Notes 搜索/详情/纯文本新增；无需 MCP 客户端、token 或审批页。Web 写入使用浏览器生成的操作 UUID 实现幂等与状态恢复；结果未知绝不自动重试。
 - 审计仅显示 Web 调试记录，支持 App/结果/时间筛选与分页，不保存标题、正文、token 或原始原生错误。管理服务仍只能运行明确指定测试清单的固定 Reminders M1 诊断，并以 UUID 日志精确恢复，不接受任意 shell 或 JXA 输入。
-- 已验证的原生创建现可通过不可变变更计划写入受限 Reminders 清单和非共享 Notes 文件夹。Calendar 写入和既有对象修改仍受门禁保护；不支持的写入会返回明确错误而不会伪造成功。MCP 当前注册 `connector.capabilities`、唯一名称的 `calendar.list_calendars`/`calendar.list_events`、限定文件夹的 `notes.list_folders`/`notes.get`/`notes.search`、已授权列表的 `reminders.list_lists`/`reminders.list`、`changes.prepare`、`changes.commit`、`operations.get`。
+- 已验证的原生创建现可通过不可变变更计划写入受限 Reminders 清单和非共享 Notes 文件夹。Calendar 写入仅在已认证管理网页中可用，并会校验写后结果；MCP 保持只读的日历接口。MCP 当前注册 `connector.capabilities`、唯一名称的 `calendar.list_calendars`/`calendar.list_events`、限定文件夹的 `notes.list_folders`/`notes.get`/`notes.search`、已授权列表的 `reminders.list_lists`/`reminders.list`、`changes.prepare`、`changes.commit`、`operations.get`。
 
 ## 范围与证据
 
-现有代码包含有界原生调用器、范围授权、SQLite 客户端/审计存储、变更计划状态机、后台服务、客户端配对、MCP 与仅 loopback 的管理网页。Calendar 读取仅在配置的名称唯一时可用；Calendar 写入、经过验证的原生写入和 Homebrew 分发仍不可用。真实 Apple 写入测试前必须明确选择专用测试容器。
+现有代码包含有界原生调用器、范围授权、SQLite 客户端/审计存储、变更计划状态机、后台服务、客户端配对、MCP 与仅 loopback 的管理网页。Calendar 读取仅在配置的名称唯一时可用；非重复日程的写入仅在已认证管理网页中可用，并经过原生复核。Homebrew 分发仍不可用。真实 Apple 写入测试前必须明确选择专用测试容器。
 
 待执行计划可能短期包含操作所需正文；成功、撤销或结果未知后清除。运行中的服务每分钟执行维护，使计划在最多 15 分钟后到期，终态幂等记录保留 30 天。结果未知的操作不会自动重试或丢弃。
 

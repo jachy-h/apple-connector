@@ -116,6 +116,27 @@ test('web reminder edits and deletions are idempotent and clear their payloads',
   } finally { store.close(); }
 });
 
+test('web calendar creates, edits, and deletes use one durable idempotent operation each', async () => {
+  const store = new Store(':memory:'); let creates = 0; let updates = 0; let deletes = 0;
+  const reminders = { preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true };
+  const calendars = {
+    create: async (change: { containerId: string }) => ({ id: `event-${++creates}`, containerId: change.containerId }),
+    update: async (change: { id: string; containerId: string }) => { updates++; return { id: change.id, containerId: change.containerId }; },
+    remove: async (change: { id: string; containerId: string }) => { deletes++; return { id: change.id, containerId: change.containerId }; },
+  };
+  const input = { containerId: 'calendar-1', title: 'PRIVATE TITLE', start: '2028-02-29T09:00:00+08:00', end: '2028-02-29T10:00:00+08:00', allDay: false, location: 'PRIVATE', notes: 'PRIVATE' };
+  try {
+    const web = new WebWrites(store, reminders, undefined, Date.now, calendars);
+    const [one, two] = await Promise.all([web.submitCalendarCreate('calendar-create', { kind: 'calendar.create', ...input }), web.submitCalendarCreate('calendar-create', { kind: 'calendar.create', ...input })]);
+    assert.equal(creates, 1); assert.equal(one.state, 'succeeded'); assert.deepEqual(one, two);
+    await web.submitCalendarUpdate('calendar-update', { kind: 'calendar.update', id: 'event-1', ...input });
+    await web.submitCalendarDelete('calendar-delete', { kind: 'calendar.delete', containerId: input.containerId, id: 'event-1' });
+    assert.equal(updates, 1); assert.equal(deletes, 1);
+    assert.ok(!JSON.stringify(store.db.prepare('SELECT * FROM web_operations').all()).includes('PRIVATE'));
+    assert.deepEqual(store.queryAudit({ source: 'web', provider: 'calendar' }).items.map((event) => event.action).sort(), ['create', 'delete', 'update']);
+  } finally { store.close(); }
+});
+
 test('definite Web reminder mutation failures remain visible and are not reported as unknown', async () => {
   const store = new Store(':memory:');
   const reminders = {

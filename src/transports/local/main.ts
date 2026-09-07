@@ -35,8 +35,9 @@ try {
 // reminder mutations remain gated until their independent support checks are complete.
 const eventKitHelper = new EventKitHelperClient();
 const reminderWriter = new EventKitReminderProvider(eventKitHelper);
+const calendarProvider = new EventKitCalendarReader(eventKitHelper);
 const operations = new ReminderOperations(store, reminderWriter);
-const webWrites = new WebWrites(store, reminderWriter);
+const webWrites = new WebWrites(store, reminderWriter, undefined, Date.now, calendarProvider);
 const diagnosticRunner = new JxaRunner();
 const activeDiagnostics = new Map<string, Promise<unknown>>();
 const managedDiagnostics = {
@@ -73,7 +74,7 @@ const managedDiagnostics = {
   },
 };
 let management: AdminWebServer;
-const facade = new ServiceFacade(store, operations, adminToken, appVersion, undefined, new JxaNoteReader(), reminderWriter, new EventKitCalendarReader(eventKitHelper), () => management.issueManagementUrl(), managedDiagnostics, webWrites);
+const facade = new ServiceFacade(store, operations, adminToken, appVersion, undefined, new JxaNoteReader(), reminderWriter, calendarProvider, () => management.issueManagementUrl(), managedDiagnostics, webWrites);
 const server = LocalServer.create({ socketPath: paths.socket, facade });
 management = new AdminWebServer({ facade, staticRoot: fileURLToPath(new URL('../../../web', import.meta.url)) });
 

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { request } from 'node:http';
 import { Store } from '../src/storage/database.js';
+import { ConnectorError } from '../src/application/errors.js';
 import { ReminderOperations } from '../src/operations/reminders.js';
 import { HttpServiceClient } from '../src/transports/local/client.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
@@ -14,6 +15,7 @@ import { loadOrCreateAdminToken } from '../src/transports/local/paths.js';
 import type { StatePaths } from '../src/transports/local/paths.js';
 import type { RpcMethod } from '../src/transports/local/rpc.js';
 import type { ReminderWriter } from '../src/providers/reminders/types.js';
+import type { CalendarReader } from '../src/providers/calendar/eventkit.js';
 
 interface Fixture {
   dir: string; store: Store; server: LocalServer; client: HttpServiceClient; adminToken: string;
@@ -22,7 +24,7 @@ interface Fixture {
   agent: (token: string, method: RpcMethod, params?: Record<string, unknown>) => Promise<unknown>;
 }
 
-async function fixture(options: { writer?: ReminderWriter; diagnostics?: ManagementDiagnostics } = {}): Promise<Fixture> {
+async function fixture(options: { writer?: ReminderWriter; diagnostics?: ManagementDiagnostics; calendarReader?: CalendarReader } = {}): Promise<Fixture> {
   const dir = mkdtempSync(join(tmpdir(), 'apple-connector-test-'));
   const paths: StatePaths = {
     dir, db: join(dir, 'db.sqlite3'), adminTokenFile: join(dir, 'admin-token'),
@@ -31,7 +33,7 @@ async function fixture(options: { writer?: ReminderWriter; diagnostics?: Managem
   const adminToken = loadOrCreateAdminToken(paths);
   const store = new Store(paths.db);
   const operations = new ReminderOperations(store, options.writer ?? m0GateWriter);
-  const server = LocalServer.create({ socketPath: paths.socket, facade: new ServiceFacade(store, operations, adminToken, 'test-version', undefined, undefined, undefined, undefined, undefined, options.diagnostics) });
+  const server = LocalServer.create({ socketPath: paths.socket, facade: new ServiceFacade(store, operations, adminToken, 'test-version', undefined, undefined, undefined, options.calendarReader, undefined, options.diagnostics) });
   await server.listen();
   const client = new HttpServiceClient(paths.socket);
   return {
@@ -95,9 +97,54 @@ test('capabilities reports the service version and verified read adapters', asyn
   assert.equal(result.version, 'test-version');
   assert.deepEqual(result.capabilities.map((c) => c.provider), ['calendar', 'reminders', 'notes']);
   assert.deepEqual(result.capabilities.map((c) => c.status), ['available', 'available', 'available']);
-  assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events']);
+  assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events', 'web_create', 'web_update', 'web_delete']);
   assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create']);
   assert.deepEqual(result.capabilities[2]?.operations, ['list_folders', 'get', 'search']);
+});
+
+test('web calendar reads resolve an exact name to an EventKit ID before listing events', async (t) => {
+  const calls: string[] = [];
+  const calendarReader: CalendarReader = {
+    listCalendars: async (ids) => { calls.push(`calendars:${ids.join(',')}`); return ids[0] === 'Work' ? [{ id: 'eventkit-work', name: 'Work' }] : []; },
+    listEvents: async (id, from, to, offset, limit) => {
+      calls.push(`events:${id}:${offset}:${limit}`);
+      assert.equal(from, '2028-02-29T00:00:00+08:00'); assert.equal(to, '2028-03-01T00:00:00+08:00');
+      return { items: [{ id: 'event-1', calendarId: id, title: 'Planning', start: '2028-02-29T09:00:00+08:00', end: '2028-02-29T10:00:00+08:00', allDay: false, location: '', notes: '' }], nextOffset: null };
+    },
+  };
+  const f = await fixture({ calendarReader });
+  t.after(() => closeFixture(f));
+  const page = await f.admin('web.calendar.list_events', { calendarId: 'Work', from: '2028-02-29T00:00:00+08:00', to: '2028-03-01T00:00:00+08:00', offset: 0, limit: 50 }) as { calendar: { id: string; name: string }; items: Array<{ title: string }> };
+  assert.deepEqual(page.calendar, { id: 'eventkit-work', name: 'Work' });
+  assert.equal(page.items[0]?.title, 'Planning');
+  assert.deepEqual(calls, ['calendars:Work', 'events:eventkit-work:0:50']);
+  const audit = await f.admin('audit.list') as Array<{ provider: string; target: string }>;
+  assert.equal(audit.at(-1)?.target, 'eventkit-work');
+});
+
+test('web calendar reads reject missing and ambiguous names before listing events', async (t) => {
+  let eventCalls = 0;
+  const f = await fixture({ calendarReader: {
+    listCalendars: async (ids) => ids[0] === 'Duplicate' ? [{ id: 'one', name: 'Duplicate' }, { id: 'two', name: 'Duplicate' }] : [],
+    listEvents: async () => { eventCalls++; return { items: [], nextOffset: null }; },
+  } });
+  t.after(() => closeFixture(f));
+  const params = { from: '2028-02-29T00:00:00+08:00', to: '2028-03-01T00:00:00+08:00' };
+  await assert.rejects(f.admin('web.calendar.list_events', { ...params, calendarId: 'Missing' }), { code: 'unsupported_operation' });
+  await assert.rejects(f.admin('web.calendar.list_events', { ...params, calendarId: 'Duplicate' }), { code: 'conflict' });
+  assert.equal(eventCalls, 0);
+});
+
+test('web calendar failures retain the native permission error code in audit metadata', async (t) => {
+  const f = await fixture({ calendarReader: {
+    listCalendars: async () => { throw new ConnectorError('permission_denied', 'Full EventKit access has not been granted to the helper.'); },
+    listEvents: async () => ({ items: [], nextOffset: null }),
+  } });
+  t.after(() => closeFixture(f));
+  await assert.rejects(f.admin('web.calendar.list_events', { calendarId: 'Personal', from: '2028-02-29T00:00:00+08:00', to: '2028-03-01T00:00:00+08:00' }), { code: 'permission_denied' });
+  const audit = await f.admin('audit.list') as Array<{ errorCode?: string; target?: string }>;
+  assert.equal(audit.at(-1)?.target, 'Personal');
+  assert.equal(audit.at(-1)?.errorCode, 'permission_denied');
 });
 
 test('management can replace policy, rotate credentials, and read metadata-only diagnostics', async (t) => {

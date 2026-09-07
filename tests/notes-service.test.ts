@@ -53,7 +53,7 @@ test('service scopes Calendar reads to unique granted names and applies busy pro
     const { token } = store.createClient({ name: 'Calendar reader', grants: [{ provider: 'calendar', containerIds: ['Agents'], actions: ['read'], fields: 'busy', expiresAt: Date.now() + 3600_000 }] });
     const reader = new JxaCalendarReader(new JxaRunner(async (request) => {
       const envelope = JSON.parse(request.input) as { operation: string; requestId: string };
-      const result = envelope.operation === 'calendar.listCalendars' ? [{ id: 'Agents', name: 'Agents' }] : { items: [{ calendarId: 'Agents', title: 'Private', start: '2028-02-29T09:00:00+08:00', end: '2028-02-29T10:00:00+08:00', allDay: false, location: 'Private', notes: 'Private' }], nextOffset: null };
+      const result = envelope.operation === 'calendar.listCalendars' ? [{ id: 'Agents', name: 'Agents' }] : { items: [{ id: 'event-1', calendarId: 'Agents', title: 'Private', start: '2028-02-29T09:00:00+08:00', end: '2028-02-29T10:00:00+08:00', allDay: false, location: 'Private', notes: 'Private' }], nextOffset: null };
       return JSON.stringify({ protocolVersion: 1, requestId: envelope.requestId, operation: envelope.operation, ok: true, result });
     }));
     const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter), 'admin', appVersion, undefined, undefined, undefined, reader);
