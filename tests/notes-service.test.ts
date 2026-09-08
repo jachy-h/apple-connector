@@ -9,11 +9,11 @@ import { JxaRunner } from '../src/jxa/runner.js';
 import { JxaReminderReader } from '../src/providers/reminders/jxa-reader.js';
 import { JxaCalendarReader } from '../src/providers/calendar/jxa-reader.js';
 
-test('service rejects new Notes grants and plans in v0.7.0', async () => {
+test('service rejects new Notes grants and plans while Notes is disabled', async () => {
   const store = new Store(':memory:');
   const now = Date.now();
   try {
-    assert.throws(() => store.createClient({ name: 'Notes client', grants: [{ provider: 'notes', containerIds: ['Agents'], actions: ['read'], approval: 'automatic', expiresAt: now + 3600_000 }] }), /temporarily unavailable/);
+    assert.throws(() => store.createClient({ name: 'Notes client', grants: [{ provider: 'notes', containerIds: ['Agents'], actions: ['read'], approval: 'automatic', expiresAt: now + 3600_000 }] }), /unavailable/);
     const { token } = store.createClient({ name: 'Reminders client', grants: [{ provider: 'reminders', containerIds: ['Agents'], actions: ['read'], approval: 'automatic', expiresAt: now + 3600_000 }] });
     const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter, () => now), 'admin', appVersion);
     const prepared = await facade.agent('operations.prepare', {

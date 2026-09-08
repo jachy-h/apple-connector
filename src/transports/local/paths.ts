@@ -17,11 +17,11 @@ export interface StatePaths {
 
 const TOKEN_BYTES = 32;
 
-/** State lives under a dedicated user directory; tests may override via APPLE_CONNECTOR_STATE_DIR. */
+/** State (including the audit SQLite database) lives under a dedicated user directory; tests may override it. */
 export function statePaths(): StatePaths {
   const base = process.env.APPLE_CONNECTOR_STATE_DIR
     ? resolve(process.env.APPLE_CONNECTOR_STATE_DIR)
-    : join(homedir(), 'Library', 'Application Support', 'AppleConnector');
+    : join(homedir(), 'apple-connector');
   if (['/', process.env.HOME].includes(base)) {
     throw new ConnectorError('invalid_request', 'State directory must be a dedicated directory, not the home directory.');
   }

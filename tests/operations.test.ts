@@ -35,6 +35,17 @@ test('default deny, expired scopes, unknown input and busy-field projection', ()
   } finally { f.store.close(); }
 });
 
+test('all-container scope authorizes any container for its provider', () => {
+  const store = new Store(':memory:');
+  try {
+    const { client } = store.createClient({ name: 'All reminders', grants: [{ provider: 'reminders', containerIds: ['*'], actions: ['read', 'create', 'delete'], expiresAt: Date.now() + 3600_000 }] });
+    assert.equal(authorize(client, 'reminders', 'any-current-or-future-list', 'read').containerIds[0], '*');
+    assert.equal(authorize(client, 'reminders', 'another-list', 'create').containerIds[0], '*');
+    assert.equal(authorize(client, 'reminders', 'another-list', 'delete').containerIds[0], '*');
+    assert.throws(() => authorize(client, 'calendar', 'a-calendar', 'read'), { code: 'permission_denied' });
+  } finally { store.close(); }
+});
+
 test('one mutation for concurrent retries and no content retained after success', async () => {
   const f = fixture();
   try {

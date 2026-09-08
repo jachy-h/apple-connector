@@ -3,8 +3,9 @@ import { z } from 'zod';
 export const providerSchema = z.enum(['calendar', 'reminders', 'notes']);
 export const grantSchema = z.object({
   provider: providerSchema,
+  // `*` grants every current and future container for this provider.
   containerIds: z.array(z.string().min(1).max(512)).min(1).max(100),
-  actions: z.array(z.enum(['read', 'create', 'update', 'complete'])).min(1).max(4),
+  actions: z.array(z.enum(['read', 'create', 'update', 'complete', 'delete'])).min(1).max(5),
   fields: z.enum(['full', 'busy']).default('full'),
   approval: z.enum(['automatic', 'required']).default('required'),
   // Epoch milliseconds, matching Date.now(); epoch seconds are rejected by the runtime comparison.
@@ -24,7 +25,7 @@ export const clientInputSchema = z.object({
   grants: z.array(grantSchema).max(30),
 }).strict().superRefine((client, context) => {
   if (client.grants.some((grant) => grant.provider === 'notes')) {
-    context.addIssue({ code: 'custom', message: 'Notes is temporarily unavailable in v0.7.0 and cannot be granted.' });
+    context.addIssue({ code: 'custom', message: 'Notes is unavailable in v0.8.3 and cannot be granted.' });
   }
 });
 export type ClientInput = z.infer<typeof clientInputSchema>;

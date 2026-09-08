@@ -7,7 +7,7 @@ export function authorize(
 ): Grant {
   if (client.revoked) throw new ConnectorError('permission_denied', 'Client access has been revoked.');
   const matches = client.grants.filter((grant) =>
-    grant.provider === provider && grant.containerIds.includes(containerId) &&
+    grant.provider === provider && (grant.containerIds.includes(containerId) || grant.containerIds.includes('*')) &&
     grant.actions.includes(action) && grant.expiresAt > now);
   if (!matches.length) throw new ConnectorError('permission_denied', 'Operation is outside the granted scope.');
   // Overlap cannot accidentally relax a busy-only or approval-required restriction.

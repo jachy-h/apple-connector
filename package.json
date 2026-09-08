@@ -1,11 +1,24 @@
 {
-  "name": "apple-connector",
-  "version": "0.8.0",
-  "private": true,
+  "name": "@jachy/apple-connector",
+  "version": "0.8.3",
   "type": "module",
-  "description": "Scoped local Apple data access for agents",
+  "description": "Local stdio MCP connector for Apple Calendar and Reminders",
   "engines": {
     "node": ">=24.20.0 <25 || >=26.8.1 <27"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "keywords": ["mcp", "model-context-protocol", "apple-calendar", "apple-reminders", "macos", "agent"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jachy-h/apple-connector.git"
+  },
+  "homepage": "https://github.com/jachy-h/apple-connector#readme",
+  "bugs": {
+    "url": "https://github.com/jachy-h/apple-connector/issues"
   },
   "bin": {
     "apple-connector": "dist/src/cli/index.js"
@@ -23,12 +36,17 @@
     "release:verify": "node scripts/release-verify.mjs"
   },
   "files": [
-    "dist/",
+    "dist/src/",
+    "dist/web/",
+    "dist/native/apple-connector-helper",
     "scripts/jxa/",
-    "native/",
     "README.md",
     "README_zh.md",
-    "docs/native-validation.md"
+    "docs/native-validation.md",
+    "docs/mcp-setup.md",
+    "docs/mcp-setup_zh.md",
+    "docs/agent-mcp-install.md",
+    "docs/agent-mcp-install_zh.md"
   ],
   "devDependencies": {
     "@types/node": "24.13.3",

@@ -35,6 +35,12 @@ export const deleteReminderSchema = z.object({
   id: z.string().min(1).max(512),
 }).strict();
 export type DeleteReminder = z.infer<typeof deleteReminderSchema>;
+export const completeReminderSchema = z.object({
+  kind: z.literal('reminders.complete'),
+  containerId: z.string().min(1).max(512),
+  id: z.string().min(1).max(512),
+}).strict();
+export type CompleteReminder = z.infer<typeof completeReminderSchema>;
 export const reminderReceiptSchema = z.object({ id: z.string().min(1).max(512), containerId: z.string().min(1).max(512) }).strict();
 export type ReminderReceipt = z.infer<typeof reminderReceiptSchema>;
 

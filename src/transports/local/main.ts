@@ -4,7 +4,7 @@ import { appVersion } from '../../application/version.js';
 import { ConnectorError } from '../../application/errors.js';
 import { runMaintenance, scheduleMaintenance } from '../../application/maintenance.js';
 import { Store } from '../../storage/database.js';
-import { ReminderOperations } from '../../operations/reminders.js';
+import { AgentOperations } from '../../operations/agent.js';
 import { EventKitReminderProvider } from '../../providers/reminders/eventkit.js';
 import { EventKitCalendarReader } from '../../providers/calendar/eventkit.js';
 import { ServiceFacade } from './handlers.js';
@@ -35,7 +35,7 @@ try {
 const eventKitHelper = new EventKitHelperClient();
 const reminderWriter = new EventKitReminderProvider(eventKitHelper);
 const calendarProvider = new EventKitCalendarReader(eventKitHelper);
-const operations = new ReminderOperations(store, reminderWriter);
+const operations = new AgentOperations(store, reminderWriter, calendarProvider, reminderWriter, calendarProvider);
 const webWrites = new WebWrites(store, reminderWriter, undefined, Date.now, calendarProvider);
 const diagnosticRunner = new JxaRunner();
 const activeDiagnostics = new Map<string, Promise<unknown>>();

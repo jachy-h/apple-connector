@@ -51,11 +51,11 @@ final class Helper {
   private func requestAccess(_ entity: EKEntityType) throws { let sem = DispatchSemaphore(value: 0); let result = AccessResult(); let completion: @Sendable (Bool, Error?) -> Void = { granted, error in result.set(error.map(Result.failure) ?? .success(granted)); sem.signal() }; if entity == .event { store.requestFullAccessToEvents(completion: completion) } else { store.requestFullAccessToReminders(completion: completion) }; guard sem.wait(timeout: .now() + 60) == .success else { throw Failure.unavailable("Authorization request timed out.") }; guard try result.get().get() else { throw Failure.denied("Full EventKit access was not granted.") } }
   func run(_ request: Request) throws -> JSONValue {
     switch request.action {
-    case "hello": return .object(["helperVersion": .string("0.6.5"), "protocolVersion": .number(Double(protocolVersion)), "actions": .array(["permissions.status", "permissions.request", "calendar.listCalendars", "calendar.listEvents", "calendar.createVerified", "calendar.updateVerified", "calendar.deleteVerified", "reminders.listLists", "reminders.list", "reminders.preflight", "reminders.createVerified", "reminders.updateVerified", "reminders.deleteVerified", "diagnostics.remindersABDelete"].map(JSONValue.string))])
+    case "hello": return .object(["helperVersion": .string("0.8.3"), "protocolVersion": .number(Double(protocolVersion)), "actions": .array(["permissions.status", "permissions.request", "calendar.listCalendars", "calendar.listEvents", "calendar.createVerified", "calendar.updateVerified", "calendar.deleteVerified", "reminders.listLists", "reminders.list", "reminders.preflight", "reminders.createVerified", "reminders.updateVerified", "reminders.completeVerified", "reminders.deleteVerified", "diagnostics.remindersABDelete"].map(JSONValue.string))])
     case "permissions.status": return .object(["calendar": access(.event), "reminders": access(.reminder)])
     case "permissions.request": let provider = try text(request.payload, "provider"); guard provider == "calendar" || provider == "reminders" else { throw Failure.invalid("Unsupported permission provider.") }; try requestAccess(provider == "calendar" ? EKEntityType.event : EKEntityType.reminder); return .object(["calendar": access(.event), "reminders": access(.reminder)])
     case "calendar.listCalendars":
-      try require(.event); guard let rawIds = request.payload["containerIds"], case .array(let values) = rawIds else { throw Failure.invalid("Invalid containerIds.") }; let wanted = Set(values.compactMap(\.string)); return .array(store.calendars(for: .event).filter { wanted.contains($0.calendarIdentifier) || wanted.contains($0.title) }.map { .object(["id": .string($0.calendarIdentifier), "name": .string($0.title)]) })
+      try require(.event); guard let rawIds = request.payload["containerIds"], case .array(let values) = rawIds else { throw Failure.invalid("Invalid containerIds.") }; let wanted = Set(values.compactMap(\.string)); return .array(store.calendars(for: .event).filter { wanted.isEmpty || wanted.contains($0.calendarIdentifier) || wanted.contains($0.title) }.map { .object(["id": .string($0.calendarIdentifier), "name": .string($0.title)]) })
     case "calendar.listEvents":
       try require(.event); let id = try text(request.payload, "calendarId"); let from = try text(request.payload, "from"); let to = try text(request.payload, "to"); guard let start = iso.date(from: from), let end = iso.date(from: to), end > start else { throw Failure.invalid("Invalid event range.") }; let offset = request.payload["offset"]?.int ?? 0; let limit = min(request.payload["limit"]?.int ?? 50, 100); let c = try calendar(id, entity: .event); let events = store.events(matching: store.predicateForEvents(withStart: start, end: end, calendars: [c])).sorted { $0.startDate < $1.startDate }; let rows = events.dropFirst(offset).prefix(limit).map { e in JSONValue.object(["id": .string(e.eventIdentifier), "calendarId": .string(id), "title": .string(e.title ?? ""), "start": .string(iso.string(from: e.startDate)), "end": .string(iso.string(from: e.endDate)), "allDay": .bool(e.isAllDay), "location": .string(e.location ?? ""), "notes": .string(e.notes ?? "")]) }; return .object(["items": .array(rows), "nextOffset": offset + rows.count < events.count ? .number(Double(offset + rows.count)) : .null])
     case "calendar.createVerified":
@@ -65,7 +65,7 @@ final class Helper {
     case "calendar.deleteVerified":
       try require(.event); let change = try eventChange(request.payload); let calendarId = try text(change, "containerId"); let id = try text(change, "id"); let c = try calendar(calendarId, entity: .event); guard c.allowsContentModifications else { throw Failure.denied("The requested calendar is not writable.") }; guard let event = store.event(withIdentifier: id), event.calendar.calendarIdentifier == calendarId else { throw Failure.invalid("The requested calendar event is unavailable in this calendar.") }; guard event.recurrenceRules?.isEmpty != false else { throw Failure.invalid("Recurring calendar events cannot be deleted.") }; try store.remove(event, span: .thisEvent, commit: true); guard store.event(withIdentifier: id) == nil else { throw Failure.unknown("Calendar event deletion could not be verified.") }; return .object(["id": .string(id), "containerId": .string(calendarId)])
     case "reminders.listLists":
-      try require(.reminder); guard let rawIds = request.payload["containerIds"], case .array(let values) = rawIds else { throw Failure.invalid("Invalid containerIds.") }; let wanted = Set(values.compactMap(\.string)); return .array(store.calendars(for: .reminder).filter { wanted.contains($0.calendarIdentifier) || wanted.contains($0.title) }.map { .object(["id": .string($0.calendarIdentifier), "name": .string($0.title)]) })
+      try require(.reminder); guard let rawIds = request.payload["containerIds"], case .array(let values) = rawIds else { throw Failure.invalid("Invalid containerIds.") }; let wanted = Set(values.compactMap(\.string)); return .array(store.calendars(for: .reminder).filter { wanted.isEmpty || wanted.contains($0.calendarIdentifier) || wanted.contains($0.title) }.map { .object(["id": .string($0.calendarIdentifier), "name": .string($0.title)]) })
     case "reminders.list":
       try require(.reminder); let id = try text(request.payload, "listId"); let c = try calendar(id, entity: .reminder); let all = try fetch(store.predicateForReminders(in: [c])).sorted { $0.calendarItemIdentifier < $1.calendarItemIdentifier }; let offset = request.payload["offset"]?.int ?? 0; let limit = min(request.payload["limit"]?.int ?? 50, 100); let page = Array(all.dropFirst(offset).prefix(limit)); return .object(["items": .array(reminderRows(page, listId: id)), "nextOffset": offset + page.count < all.count ? .number(Double(offset + page.count)) : .null])
     case "reminders.preflight": try require(.reminder); let c = try calendar(try text(request.payload, "containerId"), entity: .reminder); guard c.allowsContentModifications else { throw Failure.denied("The requested Reminders list is not writable.") }; return .object([:])
@@ -134,6 +134,22 @@ final class Helper {
             saved.title == reminder.title,
             saved.notes == reminder.notes,
             saved.isCompleted == reminder.isCompleted else { throw Failure.unknown("Reminder could not be verified after updating.") }
+      return .object(["id": .string(nativeId), "containerId": .string(listId)])
+    case "reminders.completeVerified":
+      try require(.reminder)
+      guard let rawChange = request.payload["change"], case .object(let change) = rawChange else { throw Failure.invalid("Invalid reminder change.") }
+      let listId = try text(change, "containerId")
+      let nativeId = try text(change, "id")
+      let c = try calendar(listId, entity: .reminder)
+      guard c.allowsContentModifications else { throw Failure.denied("The requested Reminders list is not writable.") }
+      guard let reminder = store.calendarItem(withIdentifier: nativeId) as? EKReminder,
+            reminder.calendar.calendarIdentifier == listId else { throw Failure.invalid("The requested reminder is unavailable in this list.") }
+      guard reminder.recurrenceRules?.isEmpty != false else { throw Failure.invalid("Recurring reminders cannot be completed.") }
+      reminder.isCompleted = true
+      try store.save(reminder, commit: true)
+      guard let saved = store.calendarItem(withIdentifier: nativeId) as? EKReminder,
+            saved.calendar.calendarIdentifier == listId,
+            saved.isCompleted else { throw Failure.unknown("Reminder completion could not be verified.") }
       return .object(["id": .string(nativeId), "containerId": .string(listId)])
     case "reminders.deleteVerified":
       try require(.reminder)

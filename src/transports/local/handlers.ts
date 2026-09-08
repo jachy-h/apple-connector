@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { ConnectorError } from '../../application/errors.js';
 import { capabilities } from '../../application/capabilities.js';
 import { Store } from '../../storage/database.js';
-import { ReminderOperations } from '../../operations/reminders.js';
 import { NoteOperations } from '../../operations/notes.js';
 import { JxaNoteReader } from '../../providers/notes/jxa-reader.js';
 import type { ReminderReader } from '../../providers/reminders/eventkit.js';
@@ -14,6 +13,14 @@ import type { RpcMethod, RpcResponse } from './rpc.js';
 import { safeEqualToken } from './paths.js';
 import { PROTOCOL_VERSION } from '../../jxa/protocol.js';
 import { WebWrites } from '../../application/web-writes.js';
+
+interface AgentOperationService {
+  prepare(token: string, params: unknown): unknown | Promise<unknown>;
+  submit?(token: string, params: unknown): unknown | Promise<unknown>;
+  commit(token: string, id: string): Promise<unknown>;
+  get(token: string, id: string): unknown;
+  approve(id: string): void;
+}
 
 const operationRefParamsSchema = z.object({ id: z.string().min(1).max(128) }).strict();
 const pageSchema = z.object({ offset: z.number().int().min(0).max(20_000).default(0), limit: z.number().int().min(1).max(200).default(50) }).strict();
@@ -28,7 +35,7 @@ const webCalendarSchema = z.object({ calendarId: z.string().trim().min(1).max(51
 const webReminderSchema = z.object({ listId: z.string().trim().min(1).max(512), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict();
 const webWriteSchema = z.object({ idempotencyKey: z.string().uuid(), change: z.unknown() }).strict();
 const notesMethod = (method: RpcMethod) => method.startsWith('notes.') || method.startsWith('web.notes.');
-const notesUnavailable = () => new ConnectorError('unsupported_operation', 'Apple Notes is temporarily unavailable in v0.7.0.');
+const notesUnavailable = () => new ConnectorError('unsupported_operation', 'Apple Notes is unavailable in v0.8.3.');
 
 export interface ManagementDiagnostics {
   startReminderM1(containerId: string): { probeId: string; containerId: string; createdAt: number };
@@ -44,7 +51,7 @@ export interface ManagementDiagnostics {
 export class ServiceFacade {
   constructor(
     private readonly store: Store,
-    private readonly operations: ReminderOperations,
+    private readonly operations: AgentOperationService,
     private readonly adminToken: string,
     private readonly version: string,
     _notes?: NoteOperations,
@@ -103,9 +110,9 @@ export class ServiceFacade {
         case 'calendar.list_calendars': {
           const client = this.store.authenticate(token);
           const scopes = [...new Set(client.grants.filter((grant) => grant.provider === 'calendar' && grant.actions.includes('read') && grant.expiresAt > Date.now()).flatMap((grant) => grant.containerIds))];
-          const groups = await Promise.all(scopes.map((scope) => this.calendarsReader().listCalendars([scope])));
-          if (groups.some((items) => items.length > 1)) throw new ConnectorError('conflict', 'A Calendar name scope is ambiguous; select and authorize its EventKit ID explicitly.');
-          return rpcOk([...new Map(groups.flat().map((item) => [item.id, item])).values()]);
+          const groups = await Promise.all(scopes.map(async (scope) => ({ scope, items: await this.calendarsReader().listCalendars(scope === '*' ? [] : [scope]) })));
+          if (groups.some(({ scope, items }) => scope !== '*' && items.length > 1)) throw new ConnectorError('conflict', 'A Calendar name scope is ambiguous; select and authorize its EventKit ID explicitly.');
+          return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()]);
         }
         case 'calendar.list_events': {
           const parsed = z.object({ calendarId: z.string().min(1).max(512), from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict().superRefine((value, context) => {
@@ -118,9 +125,9 @@ export class ServiceFacade {
         case 'reminders.list_lists': {
           const client = this.store.authenticate(token);
           const scopes = [...new Set(client.grants.filter((grant) => grant.provider === 'reminders' && grant.actions.includes('read') && grant.expiresAt > Date.now()).flatMap((grant) => grant.containerIds))];
-          const groups = await Promise.all(scopes.map((scope) => this.remindersReader().listLists([scope])));
-          if (groups.some((items) => items.length > 1)) throw new ConnectorError('conflict', 'A Reminders name scope is ambiguous; select and authorize its EventKit ID explicitly.');
-          return rpcOk([...new Map(groups.flat().map((item) => [item.id, item])).values()]);
+          const groups = await Promise.all(scopes.map(async (scope) => ({ scope, items: await this.remindersReader().listLists(scope === '*' ? [] : [scope]) })));
+          if (groups.some(({ scope, items }) => scope !== '*' && items.length > 1)) throw new ConnectorError('conflict', 'A Reminders name scope is ambiguous; select and authorize its EventKit ID explicitly.');
+          return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()]);
         }
         case 'reminders.list': {
           const parsed = z.object({ listId: z.string().min(1).max(512), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict().parse(params);
@@ -130,7 +137,11 @@ export class ServiceFacade {
         case 'operations.prepare': {
           const change = params && typeof params === 'object' ? (params as { change?: { kind?: unknown } }).change : undefined;
           if (change?.kind === 'notes.create') throw notesUnavailable();
-          return rpcOk(this.operations.prepare(token, params));
+          return rpcOk(await this.operations.prepare(token, params));
+        }
+        case 'operations.submit': {
+          if (!this.operations.submit) throw new ConnectorError('unsupported_operation', 'This service build does not support direct agent mutations.');
+          return rpcOk(await this.operations.submit(token, params));
         }
         case 'operations.commit': {
           const { id } = operationRefParamsSchema.parse(params);

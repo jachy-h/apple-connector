@@ -6,11 +6,13 @@ import { JxaRunner } from '../jxa/runner.js';
 import { HttpServiceClient } from '../transports/local/client.js';
 import { health, issueManagementUrl, setup, startForegroundService, startService, status, stopService } from '../transports/local/lifecycle.js';
 import { spawn } from 'node:child_process';
-import { readAdminToken, statePaths, writeClientToken } from '../transports/local/paths.js';
-import { resolve } from 'node:path';
+import { readAdminToken, readClientToken, statePaths, writeClientToken } from '../transports/local/paths.js';
+import { join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { runMcpEntry } from '../transports/mcp/index.js';
 import { runJournaledReminderM1Diagnostic, recoverJournaledReminderM1Diagnostic } from '../application/diagnostic-journal.js';
 import type { RpcMethod } from '../transports/local/rpc.js';
+import { readClientCreateConfig, readClientUpdateConfig, writeDefaultAgentClientConfig } from './client-config.js';
 
 const [command, ...args] = process.argv.slice(2);
 
@@ -38,12 +40,21 @@ function openManagement(url: string): boolean {
   return true;
 }
 
+function mcpConfiguration(credentialFile: string): Record<string, unknown> {
+  return { mcpServers: { 'apple-connector': {
+    command: process.execPath, args: [resolve(process.argv[1] ?? ''), 'mcp'],
+    env: { APPLE_CONNECTOR_TOKEN_FILE: credentialFile,
+      ...(process.env.APPLE_CONNECTOR_STATE_DIR ? { APPLE_CONNECTOR_STATE_DIR: statePaths().dir } : {}),
+    },
+  } } };
+}
+
 try {
   switch (command) {
     case undefined:
     case '--help':
     case '-h':
-      console.log(`Apple Connector ${appVersion} — development prototype
+      console.log(`Apple Connector ${appVersion} — local MCP service
 
 Usage: apple-connector <command>
 
@@ -52,13 +63,15 @@ Usage: apple-connector <command>
   start --foreground   Replace any running service and stay attached to this terminal
   stop                 Stop the local background service
   status               Show service, database and client summary
+  agent init            Create the default agent policy and credential, then print MCP config
   client list          List paired clients
-  client create        Pair a client (--name <name> --grant <json>, repeatable)
-                      Grant: provider, containerIds, actions, fields, approval, expiresAt
-                      (expiresAt is Unix epoch milliseconds, the Date.now() scale)
+  client create        Pair a client (--config <absolute-path>)
+                      Config: { name, grants }; grants contain provider, containerIds,
+                      actions, fields, approval and expiresAt (Unix epoch milliseconds)
                       Optional --credential-file <absolute-path> stores its token as 0600
   client revoke        Revoke a client (--id <client-id>)
-  client update        Replace name/access (--id <id> --name <name> --grant <json>, repeatable)
+  client update        Replace name/access (--config <absolute-path>)
+                      Config: { id, name, grants }
   client rotate        Rotate a client credential (--id <client-id>; replacement shown once)
   mcp                  Run the stdio MCP entry (requires APPLE_CONNECTOR_TOKEN_FILE)
   mcp config           Print a stdio MCP configuration; does not edit an agent configuration
@@ -74,7 +87,7 @@ Usage: apple-connector <command>
   --help               Print this help
 
 The management UI runs only on loopback and requires a one-time setup link.
-The service refuses native writes until the M0 capability gate passes.`);
+Agent writes always require an unexpired container/action grant and a stable idempotency key.`);
       break;
 
     case 'version':
@@ -132,6 +145,41 @@ management:    ${s.running ? (s.managementAddress ?? 'starting') : 'stopped (run
       break;
     }
 
+    case 'agent': {
+      if (args.length !== 1 || args[0] !== 'init') throw new Error('Usage: apple-connector agent init');
+      const initialized = setup();
+      const configFile = join(initialized.paths.dir, 'agent-client.json');
+      const credentialFile = join(initialized.paths.dir, 'agent.token');
+      if (existsSync(credentialFile) && !existsSync(configFile)) {
+        throw new Error('agent.token exists without agent-client.json; use `mcp config --token-file` for this existing credential.');
+      }
+      let createdConfig = false;
+      if (!existsSync(configFile)) {
+        writeDefaultAgentClientConfig(configFile);
+        createdConfig = true;
+      }
+      const config = readClientCreateConfig(configFile);
+      if (config.grants.some((grant) => grant.expiresAt <= Date.now())) {
+        throw new Error('agent-client.json contains an expired grant; review it and set a future Unix-millisecond expiry before pairing.');
+      }
+      let createdCredential = false;
+      await startService();
+      if (!existsSync(credentialFile)) {
+        const created = (await admin('clients.create', config)) as { client: { id: string; name: string }; token: string };
+        writeClientToken(credentialFile, created.token);
+        createdCredential = true;
+      } else {
+        const token = readClientToken(credentialFile);
+        await new HttpServiceClient(initialized.paths.socket).request('capabilities', {}, token);
+      }
+      console.log(`Agent initialization complete.
+Policy:     ${configFile}${createdConfig ? ' (created)' : ' (reused)'}
+Credential: ${credentialFile}${createdCredential ? ' (created, owner-only)' : ' (reused)'}
+
+Add the following stdio MCP entry to your agent host configuration:\n${JSON.stringify(mcpConfiguration(credentialFile), null, 2)}`);
+      break;
+    }
+
     case 'client': {
       const sub = args[0];
       if (sub === 'list') {
@@ -139,13 +187,15 @@ management:    ${s.running ? (s.managementAddress ?? 'starting') : 'stopped (run
         const clients = (await admin('clients.list', undefined)) as Array<{ id: string; name: string; revoked: boolean; policyVersion: number }>;
         for (const c of clients) console.log(`${c.revoked ? 'revoked ' : 'active  '} ${c.name}  ${c.id}  policy v${c.policyVersion}`);
       } else if (sub === 'create') {
-        const name = flagValue('--name');
-        if (!name) throw new Error('client create requires --name <name>');
-        const grants: unknown[] = [];
-        args.forEach((arg, i) => { if (arg === '--grant' && args[i + 1]) grants.push(JSON.parse(args[i + 1] as string)); });
-        if (!grants.length) throw new Error('client create requires at least one --grant <json>');
-        const created = (await admin('clients.create', { name, grants })) as { client: { id: string; name: string }; token: string };
+        const configFile = flagValue('--config');
         const credentialFile = flagValue('--credential-file');
+        const expected = credentialFile
+          ? ['create', '--config', configFile, '--credential-file', credentialFile]
+          : ['create', '--config', configFile];
+        if (!configFile || args.length !== expected.length || expected.some((value, index) => args[index] !== value)) {
+          throw new Error('client create requires --config <absolute-path> (and optional --credential-file <absolute-path>)');
+        }
+        const created = (await admin('clients.create', readClientCreateConfig(configFile))) as { client: { id: string; name: string }; token: string };
         if (credentialFile) {
           if (credentialFile !== resolve(credentialFile)) throw new Error('client create --credential-file must be an absolute path');
           writeClientToken(credentialFile, created.token);
@@ -159,12 +209,9 @@ ${created.token}`);
         await admin('clients.revoke', { id });
         console.log(`Revoked client ${id}; pending plans are cancelled.`);
       } else if (sub === 'update') {
-        const id = flagValue('--id');
-        const name = flagValue('--name');
-        if (!id || !name) throw new Error('client update requires --id <client-id> --name <name>');
-        const grants: unknown[] = [];
-        args.forEach((arg, i) => { if (arg === '--grant' && args[i + 1]) grants.push(JSON.parse(args[i + 1] as string)); });
-        const updated = await admin('clients.update', { id, name, grants }) as { id: string; policyVersion: number };
+        const configFile = flagValue('--config');
+        if (!configFile || args.length !== 3 || args[1] !== '--config') throw new Error('client update requires --config <absolute-path>');
+        const updated = await admin('clients.update', { ...readClientUpdateConfig(configFile) }) as { id: string; policyVersion: number };
         console.log(`Updated client ${updated.id}; policy v${updated.policyVersion}. Pending unexecuted plans were cancelled.`);
       } else if (sub === 'rotate') {
         const id = flagValue('--id');
@@ -182,12 +229,8 @@ ${created.token}`);
         if (!credentialFile) throw new Error('mcp config requires --token-file <absolute-path>');
         if (credentialFile !== resolve(credentialFile)) throw new Error('mcp config --token-file must be an absolute path');
         if (args.length !== 3 || args[1] !== '--token-file') throw new Error('Unexpected arguments');
-        // argv[1] and execPath are absolute in normal Node invocation. Resolving preserves the
-        // contract for packaged wrappers too, without depending on a login-shell PATH.
-        console.log(JSON.stringify({ mcpServers: { 'apple-connector': {
-          command: process.execPath, args: [resolve(process.argv[1] ?? '') , 'mcp'],
-          env: { APPLE_CONNECTOR_TOKEN_FILE: credentialFile, APPLE_CONNECTOR_STATE_DIR: statePaths().dir },
-        } } }, null, 2));
+        // Absolute executable and entry paths do not depend on a GUI host inheriting shell PATH.
+        console.log(JSON.stringify(mcpConfiguration(credentialFile), null, 2));
       } else {
         if (args.length) throw new Error('Unexpected arguments');
         await runMcpEntry();

@@ -97,8 +97,8 @@ test('capabilities reports Notes as unavailable with no operations', async (t) =
   assert.equal(result.version, 'test-version');
   assert.deepEqual(result.capabilities.map((c) => c.provider), ['calendar', 'reminders', 'notes']);
   assert.deepEqual(result.capabilities.map((c) => c.status), ['available', 'available', 'unavailable']);
-  assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events', 'web_create', 'web_update', 'web_delete']);
-  assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create']);
+  assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events', 'create', 'update', 'delete']);
+  assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create', 'update', 'complete', 'delete']);
   assert.deepEqual(result.capabilities[2]?.operations, []);
 });
 
