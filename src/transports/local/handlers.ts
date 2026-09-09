@@ -13,6 +13,7 @@ import type { RpcMethod, RpcResponse } from './rpc.js';
 import { safeEqualToken } from './paths.js';
 import { PROTOCOL_VERSION } from '../../jxa/protocol.js';
 import { WebWrites } from '../../application/web-writes.js';
+import { calendarListEventsSchema, operationRefSchema, remindersListSchema } from '../validation.js';
 
 interface AgentOperationService {
   prepare(token: string, params: unknown): unknown | Promise<unknown>;
@@ -22,7 +23,7 @@ interface AgentOperationService {
   approve(id: string): void;
 }
 
-const operationRefParamsSchema = z.object({ id: z.string().min(1).max(128) }).strict();
+const operationRefParamsSchema = operationRefSchema;
 const pageSchema = z.object({ offset: z.number().int().min(0).max(20_000).default(0), limit: z.number().int().min(1).max(200).default(50) }).strict();
 const operationQuerySchema = pageSchema.extend({ provider: z.enum(['calendar', 'reminders', 'notes']).optional(), clientId: z.string().min(1).max(128).optional(), state: z.string().min(1).max(64).optional() });
 const auditQuerySchema = pageSchema.extend({ provider: z.enum(['calendar', 'reminders', 'notes']).optional(), clientId: z.string().min(1).max(128).optional(), source: z.enum(['client', 'web']).optional(), outcome: z.enum(['allowed', 'denied', 'succeeded', 'failed', 'outcome_unknown']).optional(), from: z.number().int().nonnegative().optional(), to: z.number().int().nonnegative().optional() }).superRefine((value, context) => { if (value.from !== undefined && value.to !== undefined && value.from > value.to) context.addIssue({ code: 'custom', message: 'The start time must not be after the end time.' }); });
@@ -31,11 +32,13 @@ const probeSchema = z.object({ probeId: z.string().uuid() }).strict();
 const permissionRequestSchema = z.object({ provider: z.enum(['calendar', 'reminders']) }).strict();
 const containerNameSchema = z.object({ name: z.string().trim().min(1).max(500) }).strict();
 const readSummarySchema = z.object({ clientId: z.string().uuid(), provider: z.literal('reminders'), containerId: z.string().min(1).max(512), limit: z.number().int().min(1).max(20).default(10) }).strict();
-const webCalendarSchema = z.object({ calendarId: z.string().trim().min(1).max(512), from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict().superRefine((value, context) => { if (Date.parse(value.to) <= Date.parse(value.from)) context.addIssue({ code: 'custom', message: 'Time range must be increasing.' }); });
-const webReminderSchema = z.object({ listId: z.string().trim().min(1).max(512), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict();
+const webCalendarSchema = calendarListEventsSchema;
+const webReminderSchema = remindersListSchema;
 const webWriteSchema = z.object({ idempotencyKey: z.string().uuid(), change: z.unknown() }).strict();
+const onboardingIdSchema = z.object({ id: z.string().uuid() }).strict();
+const onboardingCompleteSchema = z.object({ id: z.string().uuid(), clientId: z.string().uuid(), credentialFile: z.string().min(1).max(4096) }).strict();
 const notesMethod = (method: RpcMethod) => method.startsWith('notes.') || method.startsWith('web.notes.');
-const notesUnavailable = () => new ConnectorError('unsupported_operation', 'Apple Notes is unavailable in v0.8.3.');
+const notesUnavailable = () => new ConnectorError('unsupported_operation', 'Apple Notes is unavailable in v0.8.4.');
 
 export interface ManagementDiagnostics {
   startReminderM1(containerId: string): { probeId: string; containerId: string; createdAt: number };
@@ -47,7 +50,7 @@ export interface ManagementDiagnostics {
   requestPermission?(provider: 'calendar' | 'reminders'): Promise<unknown>;
 }
 
-/** Application service facade. MCP and the local HTTP transport are thin clients of this boundary. */
+/** Application service facade. CLI and local management transports are thin clients of this boundary. */
 export class ServiceFacade {
   constructor(
     private readonly store: Store,
@@ -115,9 +118,7 @@ export class ServiceFacade {
           return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()]);
         }
         case 'calendar.list_events': {
-          const parsed = z.object({ calendarId: z.string().min(1).max(512), from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict().superRefine((value, context) => {
-            if (Date.parse(value.to) <= Date.parse(value.from)) context.addIssue({ code: 'custom', message: 'Time range must be increasing.' });
-          }).parse(params);
+          const parsed = calendarListEventsSchema.parse(params);
           const client = this.store.authenticate(token); const grant = await this.calendarGrant(client, parsed.calendarId);
           const page = await this.calendarsReader().listEvents(parsed.calendarId, parsed.from, parsed.to, parsed.offset, parsed.limit);
           return rpcOk({ items: page.items.map((event) => projectCalendarEvent(event, grant.fields)), nextOffset: page.nextOffset });
@@ -130,7 +131,7 @@ export class ServiceFacade {
           return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()]);
         }
         case 'reminders.list': {
-          const parsed = z.object({ listId: z.string().min(1).max(512), offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(50) }).strict().parse(params);
+          const parsed = remindersListSchema.parse(params);
           const client = this.store.authenticate(token); await this.reminderGrant(client, parsed.listId);
           return rpcOk(await this.remindersReader().list(parsed.listId, parsed.offset, parsed.limit));
         }
@@ -279,6 +280,15 @@ export class ServiceFacade {
           this.store.audit({ at: Date.now(), source: 'web', action: 'read', outcome: 'succeeded', count: 0, target: parsed.name, durationMs: Date.now() - startedAt });
           return rpcOk(result);
         }
+        case 'web.list_containers': {
+          const parsed = z.object({ provider: z.enum(['calendar', 'reminders']) }).strict().parse(params);
+          const startedAt = Date.now();
+          const items = parsed.provider === 'calendar'
+            ? await this.calendarsReader().listCalendars([])
+            : await this.remindersReader().listLists([]);
+          this.store.audit({ at: Date.now(), source: 'web', provider: parsed.provider, action: 'read', outcome: 'succeeded', count: items.length, durationMs: Date.now() - startedAt });
+          return rpcOk(items);
+        }
         case 'web.calendar.list_events': {
           const parsed = webCalendarSchema.parse(params);
           const startedAt = Date.now();
@@ -349,6 +359,21 @@ export class ServiceFacade {
         case 'management.issue_link': {
           if (!this.issueManagementLink) throw new ConnectorError('service_unavailable', 'Management site is not configured.');
           return rpcOk({ url: this.issueManagementLink() });
+        }
+        case 'onboarding.create': {
+          const expiresAt = z.object({ expiresAt: z.number().int().positive() }).strict().parse(params).expiresAt;
+          return rpcOk(this.store.createOnboarding(expiresAt));
+        }
+        case 'onboarding.status': {
+          const onboarding = this.store.onboarding(onboardingIdSchema.parse(params).id);
+          if (onboarding.state !== 'configured') return rpcOk({ id: onboarding.id, state: onboarding.state, expiresAt: onboarding.expiresAt });
+          const client = this.store.client(onboarding.clientId!);
+          return rpcOk({ id: onboarding.id, state: 'configured', expiresAt: onboarding.expiresAt, clientId: client.id, profileName: client.name, grants: client.grants, credentialFile: onboarding.credentialFile });
+        }
+        case 'onboarding.complete': {
+          const parsed = onboardingCompleteSchema.parse(params);
+          this.store.completeOnboarding(parsed.id, parsed.clientId, parsed.credentialFile);
+          return rpcOk({ id: parsed.id, state: 'configured' });
         }
       }
       throw new ConnectorError('invalid_request', 'Unhandled admin method.');

@@ -1,14 +1,25 @@
 {
   "name": "@jachy/apple-connector",
-  "version": "0.8.3",
+  "version": "0.9.6",
   "type": "module",
-  "description": "Local stdio MCP connector for Apple Calendar and Reminders",
+  "description": "Local CLI connector for Apple Calendar and Reminders",
+  "license": "MIT",
   "engines": {
     "node": ">=24.20.0 <25 || >=26.8.1 <27"
   },
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "keywords": ["mcp", "model-context-protocol", "apple-calendar", "apple-reminders", "macos", "agent"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "keywords": [
+    "apple-calendar",
+    "apple-reminders",
+    "macos",
+    "agent",
+    "cli"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -25,8 +36,8 @@
   },
   "scripts": {
     "start": "npm run build && node dist/src/cli/index.js start --foreground",
-    "build": "npm run build:web && tsc -p tsconfig.json && npm run build:native && rm -rf dist/web && cp -R web/dist dist/web",
-    "build:native": "swift build -c release --package-path native && mkdir -p dist/native && cp native/.build/release/apple-connector-helper dist/native/apple-connector-helper",
+    "build": "npm run build:web && rm -rf dist/src dist/tests && tsc -p tsconfig.json && chmod 755 dist/src/cli/index.js && npm run build:native && rm -rf dist/web && cp -R web/dist dist/web",
+    "build:native": "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build -c release --package-path native && mkdir -p dist/native && cp native/.build/release/apple-connector-helper dist/native/apple-connector-helper",
     "build:web": "vite build --config vite.config.ts",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "check:jxa": "node scripts/check-jxa.mjs",
@@ -43,10 +54,14 @@
     "README.md",
     "README_zh.md",
     "docs/native-validation.md",
-    "docs/mcp-setup.md",
-    "docs/mcp-setup_zh.md",
-    "docs/agent-mcp-install.md",
-    "docs/agent-mcp-install_zh.md"
+    "docs/cli.md",
+    "docs/skill.md",
+    "docs/getting-started.md",
+    "docs/getting-started_zh.md",
+    "docs/install-for-agent.md",
+    "docs/install-for-agent_zh.md",
+    "docs/v0.8-to-v0.9-migration.md",
+    "skill/"
   ],
   "devDependencies": {
     "@types/node": "24.13.3",
@@ -57,7 +72,6 @@
     "vite": "^7.3.5"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "zod": "4.5.4"

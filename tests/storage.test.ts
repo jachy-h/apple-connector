@@ -240,7 +240,21 @@ test('v1 databases migrate operations to an explicit reminders provider', () => 
     const store = new Store(path);
     try {
       assert.equal(store.operationProvider('op'), 'reminders');
-      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 3);
+      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
     } finally { store.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('onboarding status retains only profile metadata and expires without a credential', () => {
+  const store = new Store(':memory:');
+  const pending = store.createOnboarding(Date.now() + 60_000);
+  assert.deepEqual(store.onboarding(pending.id), { id: pending.id, state: 'pending', expiresAt: pending.expiresAt });
+  const created = store.createClient({ name: 'Agent', grants: [] });
+  store.completeOnboarding(pending.id, created.client.id, '/private/profile.token');
+  const configured = store.onboarding(pending.id);
+  assert.equal(configured.state, 'configured');
+  assert.equal(configured.clientId, created.client.id);
+  assert.equal(configured.credentialFile, '/private/profile.token');
+  assert.equal(JSON.stringify(configured).includes(created.token), false);
+  store.close();
 });

@@ -29,7 +29,7 @@ function changeAccess(change: AgentChange): { provider: Provider; action: Action
   return { provider, action: verb };
 }
 
-/** Durable agent mutation service shared by all Calendar and Reminders MCP write tools. */
+/** Durable agent mutation service shared by all Calendar and Reminders CLI write commands. */
 export class AgentOperations {
   private tail: Promise<unknown> = Promise.resolve();
   constructor(

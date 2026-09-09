@@ -25,7 +25,7 @@ export const clientInputSchema = z.object({
   grants: z.array(grantSchema).max(30),
 }).strict().superRefine((client, context) => {
   if (client.grants.some((grant) => grant.provider === 'notes')) {
-    context.addIssue({ code: 'custom', message: 'Notes is unavailable in v0.8.3 and cannot be granted.' });
+    context.addIssue({ code: 'custom', message: 'Notes is unavailable in v0.8.4 and cannot be granted.' });
   }
 });
 export type ClientInput = z.infer<typeof clientInputSchema>;

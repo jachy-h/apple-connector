@@ -22,7 +22,7 @@ export class Store {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL;');
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 3) {
+    if (row.user_version > 4) {
       this.db.close();
       throw new ConnectorError('service_unavailable', 'Database was created by a newer version.');
     }
@@ -48,6 +48,42 @@ export class Store {
       CREATE INDEX web_operations_created_at ON web_operations(created_at DESC);
       PRAGMA user_version=3;
     `));
+    if (row.user_version <= 3) this.transaction(() => this.db.exec(`
+      CREATE TABLE onboarding (id TEXT PRIMARY KEY, state TEXT NOT NULL, expires_at INTEGER NOT NULL,
+        client_id TEXT REFERENCES clients(id), credential_file TEXT, failure_code TEXT, created_at INTEGER NOT NULL);
+      CREATE INDEX onboarding_expires_at ON onboarding(expires_at);
+      PRAGMA user_version=4;
+    `));
+  }
+
+  createOnboarding(expiresAt: number): { id: string; expiresAt: number; state: 'pending' } {
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) throw new ConnectorError('invalid_request', 'Onboarding expiry must be in the future.');
+    const id = randomUUID();
+    this.transaction(() => this.db.prepare('INSERT INTO onboarding(id,state,expires_at,created_at) VALUES(?,?,?,?)').run(id, 'pending', expiresAt, Date.now()));
+    return { id, expiresAt, state: 'pending' };
+  }
+
+  onboarding(id: string): { id: string; state: 'pending' | 'configured' | 'expired' | 'failed'; expiresAt: number; clientId?: string; credentialFile?: string; failureCode?: string } {
+    const row = this.db.prepare('SELECT id,state,expires_at,client_id,credential_file,failure_code FROM onboarding WHERE id=?').get(id) as { id: string; state: string; expires_at: number; client_id: string | null; credential_file: string | null; failure_code: string | null } | undefined;
+    if (!row) throw new ConnectorError('invalid_request', 'Unknown onboarding ID.');
+    if (row.state === 'pending' && row.expires_at <= Date.now()) {
+      this.db.prepare("UPDATE onboarding SET state='expired' WHERE id=? AND state='pending'").run(id);
+      return { id: row.id, state: 'expired', expiresAt: row.expires_at };
+    }
+    if (!['pending', 'configured', 'expired', 'failed'].includes(row.state)) throw new ConnectorError('service_unavailable', 'Invalid onboarding state.');
+    return { id: row.id, state: row.state as 'pending' | 'configured' | 'expired' | 'failed', expiresAt: row.expires_at,
+      ...(row.client_id ? { clientId: row.client_id } : {}), ...(row.credential_file ? { credentialFile: row.credential_file } : {}), ...(row.failure_code ? { failureCode: row.failure_code } : {}) };
+  }
+
+  completeOnboarding(id: string, clientId: string, credentialFile: string): void {
+    const current = this.onboarding(id);
+    if (current.state === 'configured') {
+      if (current.clientId === clientId && current.credentialFile === credentialFile) return;
+      throw new ConnectorError('conflict', 'This onboarding has already configured a profile.');
+    }
+    if (current.state !== 'pending') throw new ConnectorError('conflict', `This onboarding is ${current.state}.`);
+    this.client(clientId);
+    this.transaction(() => this.db.prepare("UPDATE onboarding SET state='configured',client_id=?,credential_file=? WHERE id=? AND state='pending'").run(clientId, credentialFile, id));
   }
 
   transaction<T>(work: () => T): T {

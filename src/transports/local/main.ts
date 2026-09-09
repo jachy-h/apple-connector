@@ -1,5 +1,4 @@
 import { chmodSync, existsSync, rmSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { appVersion } from '../../application/version.js';
 import { ConnectorError } from '../../application/errors.js';
 import { runMaintenance, scheduleMaintenance } from '../../application/maintenance.js';
@@ -11,7 +10,6 @@ import { ServiceFacade } from './handlers.js';
 import { LocalServer } from './service.js';
 import { acquireServiceLock, readAdminToken, releaseServiceLock, statePaths } from './paths.js';
 import { appendServiceLog } from './logging.js';
-import { AdminWebServer } from '../admin/server.js';
 import { JxaRunner } from '../../jxa/runner.js';
 import { EventKitHelperClient } from '../../native/helper-client.js';
 import { WebWrites } from '../../application/web-writes.js';
@@ -72,10 +70,8 @@ const managedDiagnostics = {
     return eventKitHelper.call('permissions.request', { provider }, 65_000);
   },
 };
-let management: AdminWebServer;
-const facade = new ServiceFacade(store, operations, adminToken, appVersion, undefined, undefined, reminderWriter, calendarProvider, () => management.issueManagementUrl(), managedDiagnostics, webWrites);
+const facade = new ServiceFacade(store, operations, adminToken, appVersion, undefined, undefined, reminderWriter, calendarProvider, undefined, managedDiagnostics, webWrites);
 const server = LocalServer.create({ socketPath: paths.socket, facade });
-management = new AdminWebServer({ facade, staticRoot: fileURLToPath(new URL('../../../web', import.meta.url)) });
 
 function log(message: string): void {
   appendServiceLog(paths.logFile, message);
@@ -89,11 +85,9 @@ async function shutdown(): Promise<void> {
   if (maintenanceTimer) clearInterval(maintenanceTimer);
   log('shutting down');
   try { await server.close(); } catch { /* Best effort. */ }
-  try { await management.close(); } catch { /* Best effort. */ }
   try { await eventKitHelper.close(); } catch { /* Best effort. */ }
   try { store.close(); } catch { /* Best effort. */ }
   try { rmSync(paths.pidFile, { force: true }); } catch { /* Best effort. */ }
-  try { rmSync(paths.adminUrlFile, { force: true }); } catch { /* Best effort. */ }
   releaseServiceLock(paths);
   log('stopped');
   process.exit(0);
@@ -103,9 +97,6 @@ process.on('SIGTERM', () => { void shutdown(); });
 process.on('SIGINT', () => { void shutdown(); });
 
 try {
-  const managementUrl = await management.listen();
-  writeFileSync(paths.adminUrlFile, `${managementUrl}\n`, { mode: 0o600 });
-  try { chmodSync(paths.adminUrlFile, 0o600); } catch { /* Best effort. */ }
   // Attempt native warm-up before advertising RPC. A failed warm-up is provider degradation,
   // not a reason to hide the management service that the user needs for permission recovery.
   try { await eventKitHelper.call('permissions.status', {}); }
@@ -113,14 +104,12 @@ try {
   await server.listen();
   writeFileSync(paths.pidFile, `${process.pid}\n`, { mode: 0o600 });
   try { chmodSync(paths.pidFile, 0o600); } catch { /* Best effort. */ }
-  log(`listening on ${paths.socket} (pid ${process.pid}); management site ready on loopback`);
+  log(`listening on ${paths.socket} (pid ${process.pid})`);
   const result = runMaintenance(store, paths.db);
   log(`maintenance completed (database bytes: ${result.databaseBytes ?? 'unknown'})`);
 } catch (error) {
   log(`fatal: ${String(error)}`);
-  try { await management.close(); } catch { /* Best effort. */ }
   store.close();
-  try { rmSync(paths.adminUrlFile, { force: true }); } catch { /* Best effort. */ }
   releaseServiceLock(paths);
   process.exit(1);
 }

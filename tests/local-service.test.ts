@@ -28,7 +28,7 @@ async function fixture(options: { writer?: ReminderWriter; diagnostics?: Managem
   const dir = mkdtempSync(join(tmpdir(), 'apple-connector-test-'));
   const paths: StatePaths = {
     dir, db: join(dir, 'db.sqlite3'), adminTokenFile: join(dir, 'admin-token'),
-    socket: join(dir, 'service.sock'), pidFile: join(dir, 'service.pid'), serviceLock: join(dir, 'service.lock'), adminUrlFile: join(dir, 'admin-url'), logFile: join(dir, 'service.log'),
+    socket: join(dir, 'service.sock'), pidFile: join(dir, 'service.pid'), serviceLock: join(dir, 'service.lock'), adminUrlFile: join(dir, 'admin-url'), webPidFile: join(dir, 'web.pid'), webExpiresAtFile: join(dir, 'web-expires-at'), logFile: join(dir, 'service.log'),
   };
   const adminToken = loadOrCreateAdminToken(paths);
   const store = new Store(paths.db);
@@ -100,6 +100,16 @@ test('capabilities reports Notes as unavailable with no operations', async (t) =
   assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events', 'create', 'update', 'delete']);
   assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create', 'update', 'complete', 'delete']);
   assert.deepEqual(result.capabilities[2]?.operations, []);
+});
+
+test('local Calendar validation reports an actionable parameter error before native access', async (t) => {
+  const f = await fixture();
+  t.after(() => closeFixture(f));
+  const { token } = await pairClient(f);
+  await assert.rejects(
+    f.agent(token, 'calendar.list_events', { calendarId: 'calendar', from: '2026-09-07T00:00:00', to: '2026-09-08T00:00:00+08:00' }),
+    (error: unknown) => error instanceof ConnectorError && error.code === 'invalid_request' && error.message.includes('Invalid argument "from"') && !error.message.includes('calendar'),
+  );
 });
 
 test('web calendar reads resolve an exact name to an EventKit ID before listing events', async (t) => {

@@ -1,20 +1,15 @@
 import { z } from 'zod';
+import { dateOnlySchema, identifierSchema, instantSchema, timeZoneSchema } from '../../transports/validation.js';
 
 // Date-only and zoned time remain distinct all the way to the native adapter.
-const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
-  const date = new Date(`${value}T12:00:00Z`);
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
-}, 'Invalid calendar date');
 export const dueSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('date'), date: dateOnly }).strict(),
-  z.object({ kind: z.literal('instant'), at: z.iso.datetime({ offset: true }), timeZone: z.string().refine((value) => {
-    try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; }
-  }, 'Invalid time zone') }).strict(),
+  z.object({ kind: z.literal('date'), date: dateOnlySchema }).strict(),
+  z.object({ kind: z.literal('instant'), at: instantSchema, timeZone: timeZoneSchema }).strict(),
 ]);
 
 export const createReminderSchema = z.object({
   kind: z.literal('reminders.create'),
-  containerId: z.string().min(1).max(512),
+  containerId: identifierSchema(),
   title: z.string().trim().min(1).max(500),
   body: z.string().max(32_000).default(''),
   due: dueSchema.optional(),
@@ -22,8 +17,8 @@ export const createReminderSchema = z.object({
 export type CreateReminder = z.infer<typeof createReminderSchema>;
 export const updateReminderSchema = z.object({
   kind: z.literal('reminders.update'),
-  containerId: z.string().min(1).max(512),
-  id: z.string().min(1).max(512),
+  containerId: identifierSchema(),
+  id: identifierSchema(),
   title: z.string().trim().min(1).max(500),
   body: z.string().max(32_000).default(''),
   completed: z.boolean(),
@@ -31,14 +26,14 @@ export const updateReminderSchema = z.object({
 export type UpdateReminder = z.infer<typeof updateReminderSchema>;
 export const deleteReminderSchema = z.object({
   kind: z.literal('reminders.delete'),
-  containerId: z.string().min(1).max(512),
-  id: z.string().min(1).max(512),
+  containerId: identifierSchema(),
+  id: identifierSchema(),
 }).strict();
 export type DeleteReminder = z.infer<typeof deleteReminderSchema>;
 export const completeReminderSchema = z.object({
   kind: z.literal('reminders.complete'),
-  containerId: z.string().min(1).max(512),
-  id: z.string().min(1).max(512),
+  containerId: identifierSchema(),
+  id: identifierSchema(),
 }).strict();
 export type CompleteReminder = z.infer<typeof completeReminderSchema>;
 export const reminderReceiptSchema = z.object({ id: z.string().min(1).max(512), containerId: z.string().min(1).max(512) }).strict();

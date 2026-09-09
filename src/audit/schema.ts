@@ -3,7 +3,7 @@ import { providerSchema } from '../policy/schema.js';
 
 export const auditEventSchema = z.object({
   at: z.number().int().nonnegative(),
-  // Web debugging is authenticated by the loopback management session, not an MCP client.
+  // Web debugging is authenticated by the loopback management session, not an agent credential.
   // Keep clientId optional so old client-origin records remain fully compatible.
   clientId: z.string().max(128).optional(),
   source: z.enum(['client', 'web']).default('client'),

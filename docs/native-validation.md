@@ -54,7 +54,7 @@ node dist/src/cli/index.js doctor --probe
 | Apple App 超时但实际写入完成的对账 | 已复现：M0/M1 返回超时后，Reminders UI 可见 UUID 对象；按 UUID 精确清理并按稳定 ID 回读通过 |
 | DST、跨时区、日期-only 保存后往返 | 未执行 |
 | Notes 简单 HTML/纯文本创建后往返 | 未执行 |
-| 终端启动 vs MCP 客户端启动的权限归属 | 未执行 |
+| 终端启动 vs CLI Agent 调用的权限归属 | 未执行 |
 | 后台用户进程启动与重启 | 未执行 |
 | Formula 全新安装、版本路径变化与升级 | 未执行 |
 | Intel 与其他 macOS 版本 | 未执行 |

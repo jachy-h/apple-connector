@@ -7,18 +7,18 @@ import { ConnectorError, publicError } from '../../application/errors.js';
 import { capabilities } from '../../application/capabilities.js';
 import { safeEqualToken } from '../local/paths.js';
 import { adminMethods, rpcMethodSchema } from '../local/rpc.js';
-import { ServiceFacade } from '../local/handlers.js';
+import type { RpcResponse } from '../local/rpc.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
-const SESSION_TTL_MS = 8 * 60 * 60_000;
 const BOOTSTRAP_TTL_MS = 10 * 60_000;
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8', '.ico': 'image/x-icon',
 };
 
-interface Session { csrf: string; expiresAt: number }
-export interface AdminWebServerOptions { facade: ServiceFacade; staticRoot: string }
+interface Session { csrf: string; expiresAt: number; onboardingId?: string }
+export interface ManagementFacade { management(method: import('../local/rpc.js').RpcMethod, params: unknown): Promise<RpcResponse> }
+export interface AdminWebServerOptions { facade: ManagementFacade; staticRoot: string; expiresAt?: number; controlToken?: string }
 
 /**
  * Loopback-only management site. The startup URL carries a one-time, memory-only bootstrap
@@ -26,12 +26,16 @@ export interface AdminWebServerOptions { facade: ServiceFacade; staticRoot: stri
  */
 export class AdminWebServer {
   private readonly server: Server;
-  private bootstrap: string | undefined;
+  private bootstrap: { token: string; onboardingId?: string } | undefined;
   private bootstrapExpiresAt = 0;
   private readonly sessions = new Map<string, Session>();
   private port: number | undefined;
 
+  private readonly expiresAt: number;
+  private readonly controlToken: string;
   constructor(private readonly options: AdminWebServerOptions) {
+    this.expiresAt = options.expiresAt ?? Date.now() + 60 * 60_000;
+    this.controlToken = options.controlToken ?? '';
     this.server = createServer((req, res) => { void this.handle(req, res); });
   }
 
@@ -48,16 +52,18 @@ export class AdminWebServer {
 
   managementUrl(): string {
     if (!this.port) throw new ConnectorError('service_unavailable', 'Management site is not running.');
+    this.assertActive();
     if (!this.bootstrap || Date.now() > this.bootstrapExpiresAt) return this.issueManagementUrl();
-    return `http://127.0.0.1:${this.port}/?bootstrap=${encodeURIComponent(this.bootstrap)}`;
+    return `http://127.0.0.1:${this.port}/?bootstrap=${encodeURIComponent(this.bootstrap.token)}`;
   }
 
   /** Issue a fresh one-time login link without disturbing existing browser sessions. */
-  issueManagementUrl(): string {
+  issueManagementUrl(onboardingId?: string): string {
+    this.assertActive();
     if (!this.port) throw new ConnectorError('service_unavailable', 'Management site is not running.');
-    this.bootstrap = randomBytes(32).toString('base64url');
+    this.bootstrap = { token: randomBytes(32).toString('base64url'), ...(onboardingId ? { onboardingId } : {}) };
     this.bootstrapExpiresAt = Date.now() + BOOTSTRAP_TTL_MS;
-    return `http://127.0.0.1:${this.port}/?bootstrap=${encodeURIComponent(this.bootstrap)}`;
+    return `http://127.0.0.1:${this.port}/?bootstrap=${encodeURIComponent(this.bootstrap.token)}`;
   }
 
   async close(): Promise<void> {
@@ -66,9 +72,12 @@ export class AdminWebServer {
   }
 
   private origin(): string { return `http://127.0.0.1:${this.port}`; }
+  private assertActive(): void {
+    if (Date.now() >= this.expiresAt) throw new ConnectorError('service_unavailable', 'Management session expired. Run apple-connector open again.');
+  }
   private validHost(req: IncomingMessage): boolean { return req.headers.host === `127.0.0.1:${this.port}`; }
   private cleanSessions(): void {
-    const now = Date.now(); for (const [id, session] of this.sessions) if (session.expiresAt <= now) this.sessions.delete(id);
+    const now = Date.now(); for (const [id, session] of this.sessions) if (session.expiresAt <= now || now >= this.expiresAt) this.sessions.delete(id);
   }
   private session(req: IncomingMessage): Session | undefined {
     this.cleanSessions();
@@ -97,20 +106,28 @@ export class AdminWebServer {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (!this.validHost(req)) return this.reject(res, 403, 'Invalid Host header.');
     const url = new URL(req.url ?? '/', this.origin());
+    if (req.method === 'POST' && url.pathname === '/control/issue') {
+      if (!safeEqualToken(req.headers.authorization?.replace(/^Bearer\s+/i, '').trim(), this.controlToken)) return this.reject(res, 403, 'Invalid control credential.');
+      const onboardingId = url.searchParams.get('onboardingId') ?? undefined;
+      if (onboardingId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(onboardingId)) return this.reject(res, 400, 'Invalid onboarding ID.');
+      try { return this.sendJson(res, { url: this.issueManagementUrl(onboardingId), expiresAt: this.expiresAt, remainingSeconds: Math.max(0, Math.ceil((this.expiresAt - Date.now()) / 1000)) }); }
+      catch (error) { return this.sendJson(res, { error: publicError(error) }, 410); }
+    }
+    if (Date.now() >= this.expiresAt) return this.reject(res, 410, 'Management session expired. Run apple-connector open again.');
     if (req.method === 'GET' && url.pathname === '/' && url.searchParams.has('bootstrap')) {
       const candidate = url.searchParams.get('bootstrap') ?? '';
-      if (!this.bootstrap || Date.now() > this.bootstrapExpiresAt || !safeEqualToken(candidate, this.bootstrap)) return this.reject(res, 403, 'Management link expired.');
+      if (!this.bootstrap || Date.now() > this.bootstrapExpiresAt || !safeEqualToken(candidate, this.bootstrap.token)) return this.reject(res, 403, 'Management link expired.');
       const id = randomBytes(32).toString('base64url');
       const csrf = randomBytes(32).toString('base64url');
-      this.sessions.set(id, { csrf, expiresAt: Date.now() + SESSION_TTL_MS });
+      this.sessions.set(id, { csrf, expiresAt: this.expiresAt, ...(this.bootstrap.onboardingId ? { onboardingId: this.bootstrap.onboardingId } : {}) });
       this.bootstrap = undefined;
-      res.writeHead(303, { location: '/', 'set-cookie': `ac_admin_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`, 'cache-control': 'no-store' });
+      res.writeHead(303, { location: '/', 'set-cookie': `ac_admin_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.max(0, Math.floor((this.expiresAt - Date.now()) / 1000))}`, 'cache-control': 'no-store' });
       res.end();
       return;
     }
     const session = this.session(req);
     if (!session) return this.reject(res, 401, 'Management session required.');
-    if (req.method === 'GET' && url.pathname === '/api/bootstrap') return this.sendJson(res, { csrf: session.csrf, capabilities: capabilities() });
+    if (req.method === 'GET' && url.pathname === '/api/bootstrap') return this.sendJson(res, { csrf: session.csrf, capabilities: capabilities(), expiresAt: this.expiresAt, remainingSeconds: Math.max(0, Math.ceil((this.expiresAt - Date.now()) / 1000)), ...(session.onboardingId ? { onboardingId: session.onboardingId } : {}) });
     if (req.method === 'POST' && url.pathname === '/api/rpc') {
       if (req.headers.origin !== this.origin() || !safeEqualToken(req.headers['x-csrf-token'], session.csrf)) return this.reject(res, 403, 'CSRF validation failed.');
       let request: { method?: unknown; params?: unknown };
@@ -120,6 +137,7 @@ export class AdminWebServer {
       } catch (error) { return this.sendJson(res, { ok: false, error: publicError(error) }, 400); }
       const method = rpcMethodSchema.parse(request.method);
       if (!adminMethods.has(method)) return this.sendJson(res, { ok: false, error: publicError(new ConnectorError('permission_denied', 'This method is not available to management UI.')) });
+      if (method === 'clients.create' && session.onboardingId && request.params && typeof request.params === 'object' && !Array.isArray(request.params)) request.params = { ...(request.params as Record<string, unknown>), onboardingId: session.onboardingId };
       return this.sendJson(res, await this.options.facade.management(method, request.params));
     }
     if (req.method !== 'GET') return this.reject(res, 405, 'Method not allowed.');

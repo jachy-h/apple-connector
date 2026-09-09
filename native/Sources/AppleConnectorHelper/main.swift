@@ -23,8 +23,23 @@ final class AccessResult: @unchecked Sendable {
 
 final class Helper {
   private let store = EKEventStore()
-  private let iso = ISO8601DateFormatter()
-  init() { iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds] }
+  private let isoOutput = ISO8601DateFormatter()
+  private let isoWithFractionalSeconds = ISO8601DateFormatter()
+  private let isoWithoutFractionalSeconds = ISO8601DateFormatter()
+  init() {
+    isoOutput.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    isoWithFractionalSeconds.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    isoWithoutFractionalSeconds.formatOptions = [.withInternetDateTime]
+  }
+  private func instant(_ value: String, field: String) throws -> Date {
+    // Do not let Foundation silently interpret a local wall-clock time. The public CLI
+    // contract requires an explicit RFC 3339 offset; fractional seconds are optional.
+    guard value.range(of: #"(Z|[+-]\d{2}:\d{2})$"#, options: .regularExpression) != nil,
+          let date = isoWithFractionalSeconds.date(from: value) ?? isoWithoutFractionalSeconds.date(from: value) else {
+      throw Failure.invalid("Invalid argument \"\(field)\": expected an RFC 3339 datetime with an explicit timezone; fractional seconds are optional.")
+    }
+    return date
+  }
   private func require(_ entity: EKEntityType) throws {
     let status = EKEventStore.authorizationStatus(for: entity)
     guard status == .fullAccess else { throw Failure.denied("Full EventKit access has not been granted to the helper.") }
@@ -35,7 +50,9 @@ final class Helper {
   private func eventChange(_ payload: [String: JSONValue]) throws -> [String: JSONValue] { guard let change = payload["change"], case .object(let value) = change else { throw Failure.invalid("Invalid calendar change.") }; return value }
   private func eventFields(_ change: [String: JSONValue]) throws -> (String, Date, Date, Bool, String, String) {
     let title = try text(change, "title", 500); let startText = try text(change, "start"); let endText = try text(change, "end")
-    guard let start = iso.date(from: startText), let end = iso.date(from: endText), end > start, case .bool(let allDay) = change["allDay"] else { throw Failure.invalid("Invalid event timing.") }
+    let start = try instant(startText, field: "start"); let end = try instant(endText, field: "end")
+    guard end > start else { throw Failure.invalid("Invalid arguments \"start\" and \"end\": \"end\" must be later than \"start\".") }
+    guard case .bool(let allDay) = change["allDay"] else { throw Failure.invalid("Invalid allDay.") }
     let location = change["location"]?.string ?? ""; let notes = change["notes"]?.string ?? ""
     guard location.utf8.count <= 2_000, notes.utf8.count <= 32_000 else { throw Failure.invalid("Event text is too long.") }
     return (title, start, end, allDay, location, notes)
@@ -46,18 +63,18 @@ final class Helper {
     // two equivalent representations without weakening ID, calendar, time, or title checks.
     guard event.eventIdentifier == id, event.calendar.calendarIdentifier == calendarId, event.title == expected.0, event.startDate == expected.1, event.endDate == expected.2, event.isAllDay == expected.3, (event.location ?? "") == expected.4, (event.notes ?? "") == expected.5 else { throw Failure.unknown("Calendar event could not be verified.") }
   }
-  private func reminderRows(_ reminders: [EKReminder], listId: String) -> [JSONValue] { reminders.map { r in .object(["id": .string(r.calendarItemIdentifier), "listId": .string(listId), "title": .string(r.title ?? ""), "body": .string(r.notes ?? ""), "completed": .bool(r.isCompleted), "due": r.dueDateComponents.flatMap { Calendar.current.date(from: $0) }.map { .string(iso.string(from: $0)) } ?? .null]) } }
+  private func reminderRows(_ reminders: [EKReminder], listId: String) -> [JSONValue] { reminders.map { r in .object(["id": .string(r.calendarItemIdentifier), "listId": .string(listId), "title": .string(r.title ?? ""), "body": .string(r.notes ?? ""), "completed": .bool(r.isCompleted), "due": r.dueDateComponents.flatMap { Calendar.current.date(from: $0) }.map { .string(isoOutput.string(from: $0)) } ?? .null]) } }
   private func fetch(_ predicate: NSPredicate) throws -> [EKReminder] { let sem = DispatchSemaphore(value: 0); var result: Result<[EKReminder], Error> = .failure(Failure.unavailable("Reminder query did not complete.")); store.fetchReminders(matching: predicate) { reminders in result = .success(reminders ?? []); sem.signal() }; guard sem.wait(timeout: .now() + 30) == .success else { throw Failure.unavailable("Reminder query timed out.") }; return try result.get() }
   private func requestAccess(_ entity: EKEntityType) throws { let sem = DispatchSemaphore(value: 0); let result = AccessResult(); let completion: @Sendable (Bool, Error?) -> Void = { granted, error in result.set(error.map(Result.failure) ?? .success(granted)); sem.signal() }; if entity == .event { store.requestFullAccessToEvents(completion: completion) } else { store.requestFullAccessToReminders(completion: completion) }; guard sem.wait(timeout: .now() + 60) == .success else { throw Failure.unavailable("Authorization request timed out.") }; guard try result.get().get() else { throw Failure.denied("Full EventKit access was not granted.") } }
   func run(_ request: Request) throws -> JSONValue {
     switch request.action {
-    case "hello": return .object(["helperVersion": .string("0.8.3"), "protocolVersion": .number(Double(protocolVersion)), "actions": .array(["permissions.status", "permissions.request", "calendar.listCalendars", "calendar.listEvents", "calendar.createVerified", "calendar.updateVerified", "calendar.deleteVerified", "reminders.listLists", "reminders.list", "reminders.preflight", "reminders.createVerified", "reminders.updateVerified", "reminders.completeVerified", "reminders.deleteVerified", "diagnostics.remindersABDelete"].map(JSONValue.string))])
+    case "hello": return .object(["helperVersion": .string("0.9.6"), "protocolVersion": .number(Double(protocolVersion)), "actions": .array(["permissions.status", "permissions.request", "calendar.listCalendars", "calendar.listEvents", "calendar.createVerified", "calendar.updateVerified", "calendar.deleteVerified", "reminders.listLists", "reminders.list", "reminders.preflight", "reminders.createVerified", "reminders.updateVerified", "reminders.completeVerified", "reminders.deleteVerified", "diagnostics.remindersABDelete"].map(JSONValue.string))])
     case "permissions.status": return .object(["calendar": access(.event), "reminders": access(.reminder)])
     case "permissions.request": let provider = try text(request.payload, "provider"); guard provider == "calendar" || provider == "reminders" else { throw Failure.invalid("Unsupported permission provider.") }; try requestAccess(provider == "calendar" ? EKEntityType.event : EKEntityType.reminder); return .object(["calendar": access(.event), "reminders": access(.reminder)])
     case "calendar.listCalendars":
       try require(.event); guard let rawIds = request.payload["containerIds"], case .array(let values) = rawIds else { throw Failure.invalid("Invalid containerIds.") }; let wanted = Set(values.compactMap(\.string)); return .array(store.calendars(for: .event).filter { wanted.isEmpty || wanted.contains($0.calendarIdentifier) || wanted.contains($0.title) }.map { .object(["id": .string($0.calendarIdentifier), "name": .string($0.title)]) })
     case "calendar.listEvents":
-      try require(.event); let id = try text(request.payload, "calendarId"); let from = try text(request.payload, "from"); let to = try text(request.payload, "to"); guard let start = iso.date(from: from), let end = iso.date(from: to), end > start else { throw Failure.invalid("Invalid event range.") }; let offset = request.payload["offset"]?.int ?? 0; let limit = min(request.payload["limit"]?.int ?? 50, 100); let c = try calendar(id, entity: .event); let events = store.events(matching: store.predicateForEvents(withStart: start, end: end, calendars: [c])).sorted { $0.startDate < $1.startDate }; let rows = events.dropFirst(offset).prefix(limit).map { e in JSONValue.object(["id": .string(e.eventIdentifier), "calendarId": .string(id), "title": .string(e.title ?? ""), "start": .string(iso.string(from: e.startDate)), "end": .string(iso.string(from: e.endDate)), "allDay": .bool(e.isAllDay), "location": .string(e.location ?? ""), "notes": .string(e.notes ?? "")]) }; return .object(["items": .array(rows), "nextOffset": offset + rows.count < events.count ? .number(Double(offset + rows.count)) : .null])
+      try require(.event); let id = try text(request.payload, "calendarId"); let from = try text(request.payload, "from"); let to = try text(request.payload, "to"); let start = try instant(from, field: "from"); let end = try instant(to, field: "to"); guard end > start else { throw Failure.invalid("Invalid arguments \"from\" and \"to\": \"to\" must be later than \"from\".") }; let offset = request.payload["offset"]?.int ?? 0; let limit = min(request.payload["limit"]?.int ?? 50, 100); let c = try calendar(id, entity: .event); let events = store.events(matching: store.predicateForEvents(withStart: start, end: end, calendars: [c])).sorted { $0.startDate < $1.startDate }; let rows = events.dropFirst(offset).prefix(limit).map { e in JSONValue.object(["id": .string(e.eventIdentifier), "calendarId": .string(id), "title": .string(e.title ?? ""), "start": .string(isoOutput.string(from: e.startDate)), "end": .string(isoOutput.string(from: e.endDate)), "allDay": .bool(e.isAllDay), "location": .string(e.location ?? ""), "notes": .string(e.notes ?? "")]) }; return .object(["items": .array(rows), "nextOffset": offset + rows.count < events.count ? .number(Double(offset + rows.count)) : .null])
     case "calendar.createVerified":
       try require(.event); let change = try eventChange(request.payload); let calendarId = try text(change, "containerId"); let c = try calendar(calendarId, entity: .event); guard c.allowsContentModifications else { throw Failure.denied("The requested calendar is not writable.") }; let fields = try eventFields(change); let event = EKEvent(eventStore: store); event.calendar = c; event.title = fields.0; event.startDate = fields.1; event.endDate = fields.2; event.isAllDay = fields.3; event.location = fields.4; event.notes = fields.5; try store.save(event, span: .thisEvent, commit: true); guard let id = event.eventIdentifier, let saved = store.event(withIdentifier: id) else { throw Failure.unknown("Calendar event could not be reread after saving.") }; try verify(saved, id: id, calendarId: calendarId, expected: fields); return .object(["id": .string(id), "containerId": .string(calendarId)])
     case "calendar.updateVerified":
@@ -87,7 +104,8 @@ final class Helper {
           let parts = date.split(separator: "-").compactMap { Int($0) }
           guard parts.count == 3 else { throw Failure.invalid("Invalid due date.") }
           r.dueDateComponents = DateComponents(calendar: Calendar.current, year: parts[0], month: parts[1], day: parts[2])
-        } else if due["kind"]?.string == "instant", let at = due["at"]?.string, let zoneName = due["timeZone"]?.string, let zone = TimeZone(identifier: zoneName), let moment = iso.date(from: at) {
+        } else if due["kind"]?.string == "instant", let at = due["at"]?.string, let zoneName = due["timeZone"]?.string, let zone = TimeZone(identifier: zoneName) {
+          let moment = try instant(at, field: "due.at")
           var calendar = Calendar(identifier: .gregorian)
           calendar.timeZone = zone
           r.dueDateComponents = calendar.dateComponents(in: zone, from: moment)

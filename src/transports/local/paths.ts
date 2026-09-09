@@ -12,6 +12,8 @@ export interface StatePaths {
   pidFile: string;
   serviceLock: string;
   adminUrlFile: string;
+  webPidFile: string;
+  webExpiresAtFile: string;
   logFile: string;
 }
 
@@ -33,6 +35,8 @@ export function statePaths(): StatePaths {
     pidFile: join(base, 'service.pid'),
     serviceLock: join(base, 'service.lock'),
     adminUrlFile: join(base, 'admin-url'),
+    webPidFile: join(base, 'web.pid'),
+    webExpiresAtFile: join(base, 'web-expires-at'),
     logFile: join(base, 'service.log'),
   };
 }
@@ -59,7 +63,7 @@ export function loadOrCreateAdminToken(paths: StatePaths): string {
   return token;
 }
 
-/** Store an agent credential outside MCP configuration and command-line arguments. */
+/** Store an agent credential outside configuration and command-line arguments. */
 export function writeClientToken(file: string, token: string): void {
   if (!token || /\s/.test(token)) throw new ConnectorError('invalid_request', 'Client credential is invalid.');
   writeFileSync(file, `${token}\n`, { mode: 0o600, flag: 'wx' });
@@ -69,11 +73,11 @@ export function writeClientToken(file: string, token: string): void {
 /** Read only a regular, owner-private credential file. */
 export function readClientToken(file: string): string {
   let stat: ReturnType<typeof lstatSync>;
-  try { stat = lstatSync(file); } catch { throw new ConnectorError('invalid_request', 'MCP credential file does not exist.'); }
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new ConnectorError('invalid_request', 'MCP credential file must be a regular file.');
-  if ((stat.mode & 0o077) !== 0) throw new ConnectorError('permission_denied', 'MCP credential file must not be accessible by group or other users.');
+  try { stat = lstatSync(file); } catch { throw new ConnectorError('invalid_request', 'Agent credential file does not exist.'); }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new ConnectorError('invalid_request', 'Agent credential file must be a regular file.');
+  if ((stat.mode & 0o077) !== 0) throw new ConnectorError('permission_denied', 'Agent credential file must not be accessible by group or other users.');
   const token = readFileSync(file, 'utf8').trim();
-  if (!token || /\s/.test(token)) throw new ConnectorError('invalid_request', 'MCP credential file is invalid.');
+  if (!token || /\s/.test(token)) throw new ConnectorError('invalid_request', 'Agent credential file is invalid.');
   return token;
 }
 

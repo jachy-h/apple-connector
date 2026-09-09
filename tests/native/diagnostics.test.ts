@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { JxaRunner } from '../../src/jxa/runner.js';
+import { EventKitHelperClient } from '../../src/native/helper-client.js';
 import { JxaCalendarReader } from '../../src/providers/calendar/jxa-reader.js';
 import { runReminderM1Diagnostic } from '../../src/application/reminder-m1-diagnostic.js';
 
@@ -129,6 +131,22 @@ test('Calendar reader queries only the opted-in calendar in a bounded window wit
   );
   assert.ok(page.items.length <= 100);
   assert.ok(page.items.every((event) => event.calendarId === process.env.APPLE_CONNECTOR_CALENDAR_TEST_NAME && Date.parse(event.end) > Date.parse(event.start)));
+});
+
+test('EventKit helper accepts no-fraction RFC 3339 ranges for the opted-in test calendar', {
+  skip: process.platform !== 'darwin' || !process.env.APPLE_CONNECTOR_EVENTKIT_CALENDAR_TEST_ID,
+}, async (t) => {
+  const helper = new EventKitHelperClient(resolve('dist/native/apple-connector-helper'));
+  t.after(() => helper.close());
+  const now = Date.now();
+  const from = new Date(now - 30 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const to = new Date(now + 365 * 86_400_000).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+  const result = await helper.call('calendar.listEvents', {
+    calendarId: process.env.APPLE_CONNECTOR_EVENTKIT_CALENDAR_TEST_ID,
+    from, to, offset: 0, limit: 100,
+  }) as { items: unknown[]; nextOffset: number | null };
+  assert.ok(result.items.length <= 100);
+  assert.ok(result.nextOffset === null || Number.isInteger(result.nextOffset));
 });
 
 test('M0 probe creates, rereads and removes only its own note in the opted-in test folder', {
