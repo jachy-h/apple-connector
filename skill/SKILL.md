@@ -52,7 +52,7 @@ Use one stable `--idempotency-key` for each logical write. Put private `title`, 
 apple-connector calendar create --calendar-id <calendarId> --start <RFC3339> --end <RFC3339> [--all-day] --input <file> --idempotency-key <key> --credential-file <path> --json
 apple-connector calendar update --calendar-id <calendarId> --id <eventId> --start <RFC3339> --end <RFC3339> [--all-day] --input <file> --idempotency-key <key> --credential-file <path> --json
 apple-connector calendar delete --calendar-id <calendarId> --id <eventId> --idempotency-key <key> --credential-file <path> --json
-apple-connector reminder create --list-id <listId> --input <file> --idempotency-key <key> --credential-file <path> --json
+apple-connector reminder create --list-id <listId> [--due <RFC3339>] [--due-date <YYYY-MM-DD>] [--time-zone <IANA>] --input <file> --idempotency-key <key> --credential-file <path> --json
 apple-connector reminder update --list-id <listId> --id <reminderId> [--completed] --input <file> --idempotency-key <key> --credential-file <path> --json
 apple-connector reminder complete --list-id <listId> --id <reminderId> --idempotency-key <key> --credential-file <path> --json
 apple-connector reminder delete --list-id <listId> --id <reminderId> --idempotency-key <key> --credential-file <path> --json
@@ -62,6 +62,8 @@ Calendar input contains `title`, `location`, and `notes`. Reminder create input 
 
 - date-only: `{"kind":"date","date":"YYYY-MM-DD"}`; date-only due must not include `timeZone`.
 - instant: `{"kind":"instant","at":"RFC3339-with-offset","timeZone":"IANA"}`.
+
+Reminder create also accepts due directly as flags (no `--input` needed): `--due <RFC3339>` for a timed reminder (timezone inferred from the offset, e.g. `+08:00` → `Asia/Shanghai`, overridable with `--time-zone <IANA>`) or `--due-date <YYYY-MM-DD>` for an all-day reminder. `--due` and `--due-date` are mutually exclusive.
 
 The fields accepted by Calendar and Reminder updates are full replacements. Read the object first and preserve every unchanged field, including false/empty values; change only what the user requested. If any required field is unavailable or redacted, stop. Reminder update cannot change `due`; use `--completed` when preserving or setting `completed: true`. Recurring items cannot be updated or deleted, and recurring reminders cannot be completed.
 
