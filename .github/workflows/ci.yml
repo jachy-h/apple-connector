@@ -3,10 +3,36 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  core:
+  check:
+    name: Static checks (Linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.20.0
+          cache: npm
+      # package.json declares darwin/arm64; all npm deps are cross-platform,
+      # so --force only skips the self-platform guard, not any real constraint.
+      - run: npm ci --force
+      - run: npx tsc --noEmit -p tsconfig.json
+      - run: npm run check:jxa
+
+  core:
+    name: Release verify (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,7 +43,9 @@ jobs:
       - run: npm run release:verify
 
   macos-native:
+    name: Native tests (macOS)
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
