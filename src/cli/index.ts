@@ -9,6 +9,7 @@ import { HttpServiceClient } from '../transports/local/client.js';
 import { createOnboarding, health, onboardingStatus, openManagementWeb, setup, startForegroundService, startService, status, stopService } from '../transports/local/lifecycle.js';
 import { readClientToken, statePaths } from '../transports/local/paths.js';
 import type { RpcMethod } from '../transports/local/rpc.js';
+import { parseDueInput } from './due.js';
 
 const argv = process.argv.slice(2);
 const json = argv.includes('--json');
@@ -71,7 +72,7 @@ async function run(): Promise<void> {
     if (subcommand === 'list-lists') return result(await agent('reminders.list_lists', {}));
     if (subcommand === 'list') return result(await agent('reminders.list', { listId: required('--list-id'), offset: Number(flag('--offset') ?? 0), limit: Number(flag('--limit') ?? 50) }));
     const base = input();
-    if (subcommand === 'create') return result(await mutation({ ...base, kind: 'reminders.create', containerId: required('--list-id'), title: textInput('--title'), body: textInput('--body') ?? '' }));
+    if (subcommand === 'create') return result(await mutation({ ...base, kind: 'reminders.create', containerId: required('--list-id'), title: textInput('--title'), body: textInput('--body') ?? '', ...parseDueInput(rest) }));
     if (subcommand === 'update') return result(await mutation({ ...base, kind: 'reminders.update', containerId: required('--list-id'), id: required('--id'), title: textInput('--title'), body: textInput('--body') ?? '', completed: has('--completed') }));
     if (subcommand === 'complete') return result(await mutation({ kind: 'reminders.complete', containerId: required('--list-id'), id: required('--id') }));
     if (subcommand === 'delete') return result(await mutation({ kind: 'reminders.delete', containerId: required('--list-id'), id: required('--id') }));
