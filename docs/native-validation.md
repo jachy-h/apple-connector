@@ -25,6 +25,26 @@ node dist/src/cli/index.js doctor --probe
 | Notes 正式 reader | 正式 writer 创建后，正式 reader 的 folder list、get、title search 与按 ID 清理在 `Agents` 文件夹通过 | 不代表共享/锁定笔记或其他文件夹可读 |
 | EventKit 日历枚举 | 同一 `osascript` 进程报告 Calendar full access（4），但 `calendarsForEntityType` 中找不到 `Agents` | 授权状态不能替代真实运行时访问验证；当前不能用 EventKit 稳定事件 ID 替换 Apple Events 路径 |
 
+## 2026-11-13 v0.9.7 长期运行内存验证
+
+`apple-connector-helper` 是长期存活的单进程 JSONL helper。修复前主循环没有按请求建立/排空 autorelease pool，EventKit/Foundation 的桥接临时对象会随请求数累积；现场进程运行 63 天后的 physical footprint 为 5518 MB。v0.9.7 将单行请求处理提取为 `respond(to:helper:decoder:encoder:)`，主循环每轮执行 `autoreleasepool { respond(...) }`，JSONL 协议、错误码、超时和写入语义不变。
+
+回归检查方法：
+
+```sh
+npm run build
+node --test dist/tests/native/memory.test.js
+APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID='<专用测试列表 ID>' node --test dist/tests/native/memory.test.js
+footprint <helper-pid>
+```
+
+- 无权限基线：连续 5,000 次 `hello` 后 footprint 增量必须低于 32 MB。2026-11-13 实测由 3.1 MB 增至 3.3 MB，通过。
+- opt-in 用例：在显式指定的测试列表中创建 60 条 UUID 探针提醒，预热后连续 250 次 `reminders.list`，footprint 增量必须低于 64 MB，并在 `finally` 中逐条 `reminders.deleteVerified`。未设置 `APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID` 时跳过，不读取或修改个人数据。2026-11-13 在 `Agents` 测试列表（ID `D4DD0F18-98A9-408F-932F-49001E9653F6`）实测 2/2 通过，0 跳过、0 失败，耗时约 5.2 秒；最终构建产物复跑同样通过。
+- 修复前对照（同一台机器、旧二进制）：2,000 次 `reminders.list` 最大 RSS 844 MB；包裹 autorelease pool 后稳定在 34.7 MB。
+- 重新构建 helper 后 TCC 可能因代码签名变化要求重新授权。本次重建后的二进制在本机 Terminal 获得持久 Reminders 权限后运行 opt-in 用例；通过 SSH 运行时会因 responsible process 为 `sshd-keygen-wrapper` 而被 macOS 禁止弹窗，应改用已授权的本机 Terminal 或 GUI 会话。
+
+长期运行排查时，`ps` 的 RSS 可能因页面换出而严重低估占用，应使用 `footprint <pid>` 或 `vmmap -summary <pid>` 查看 physical footprint 与 swapped_out。发布修复版本后必须重启现有服务，旧进程不会自动回收已累积的内存。
+
 ## 公开接口检查
 
 已读取以下随本机安装的接口定义，不读取个人数据库：
@@ -45,6 +65,7 @@ node dist/src/cli/index.js doctor --probe
 
 | 维度 | 状态 |
 | --- | --- |
+| 长期运行内存（v0.9.7） | 无权限 `hello` 基线与 opt-in `reminders.list` 用例均通过（2026-11-13，`Agents` 测试列表） |
 | 用户明确指定测试日历、提醒清单、笔记文件夹 | 已提供并只读确认：三者名称均为 `Agents`；仅授权该范围用于后续 M0 测试 |
 | EventKit 首次授权请求、异步回调与拒绝恢复 | 未执行（当前验证走 Calendar/Reminders Apple Events） |
 | Notes Automation 首次授权与拒绝 | 已在创建/重读/删除路径中成功；拒绝恢复未执行 |

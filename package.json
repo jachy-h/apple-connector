@@ -1,6 +1,6 @@
 {
   "name": "@jachy/apple-connector",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "type": "module",
   "description": "Local CLI connector for Apple Calendar and Reminders",
   "license": "MIT",

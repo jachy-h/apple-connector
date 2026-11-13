@@ -38,7 +38,7 @@ for (const field of ['license', 'repository', 'homepage', 'bugs']) {
     throw new Error(`Release metadata is missing required field: ${field}`);
   }
 }
-if (manifest.name !== '@jachy/apple-connector' || manifest.version !== '0.9.6') throw new Error('Release package identity must be @jachy/apple-connector@0.9.6.');
+if (manifest.name !== '@jachy/apple-connector' || manifest.version !== '0.9.7') throw new Error('Release package identity must be @jachy/apple-connector@0.9.7.');
 if (manifest.license !== 'MIT') throw new Error('Release package must declare the MIT license.');
 const platformList = (value) => Array.isArray(value) ? value : [value];
 if (JSON.stringify(platformList(manifest.os)) !== JSON.stringify(['darwin']) || JSON.stringify(platformList(manifest.cpu)) !== JSON.stringify(['arm64'])) {
