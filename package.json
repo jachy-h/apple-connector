@@ -73,6 +73,8 @@
     "docs/getting-started_zh.md",
     "docs/install-for-agent.md",
     "docs/install-for-agent_zh.md",
+    "docs/architecture.svg",
+    "docs/architecture_zh.svg",
     "docs/v0.8-to-v0.9-migration.md",
     "skill/"
   ],

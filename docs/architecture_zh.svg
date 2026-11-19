@@ -1,0 +1,269 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="860" viewBox="0 0 960 860" role="img" aria-labelledby="title desc">
+  <title id="title">Apple Connector 架构</title>
+  <desc id="desc">本地 Agent 通过随包 Skill 和 apple-connector CLI 接入本机应用核心。应用核心负责授权、幂等、操作记录和审计，读写 SQLite 状态，提供一小时后过期的本机回环管理页面，并通过 helper.sock 调用自签名 AppleConnector.app 内的 Swift EventKit helper。helper 访问 EventKit，再访问日历与提醒事项。全程没有云端、局域网或 MCP 入口。</desc>
+
+  <defs>
+    <pattern id="halftone" width="7" height="7" patternUnits="userSpaceOnUse">
+      <circle cx="1.6" cy="1.6" r="1.2" fill="#17131f" opacity="0.20"/>
+    </pattern>
+    <pattern id="halftoneLight" width="7" height="7" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.3" fill="#fff8e7" opacity="0.45"/>
+    </pattern>
+    <pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <line x1="0" y1="0" x2="0" y2="8" stroke="#17131f" stroke-width="1.4" opacity="0.20"/>
+    </pattern>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#17131f"/>
+    </marker>
+    <marker id="arrow-start" markerWidth="8" markerHeight="8" refX="0.8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M8,0 L0,4 L8,8 Z" fill="#17131f"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="7.2" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#e8482f"/>
+    </marker>
+  </defs>
+
+  <!-- paper -->
+  <rect width="960" height="860" fill="#f6efdf"/>
+  <polygon points="960,0 742,0 960,236" fill="#ff6b4a" opacity="0.16"/>
+  <polygon points="960,0 862,0 960,118" fill="#ffd447" opacity="0.55"/>
+  <polygon points="960,0 960,64 910,0" fill="#2bb3a3" opacity="0.30"/>
+  <polygon points="0,860 208,860 0,676" fill="#2bb3a3" opacity="0.16"/>
+  <polygon points="0,860 122,860 0,742" fill="#7b5ce5" opacity="0.22"/>
+  <polygon points="700,40 960,40 960,270 760,240" fill="url(#halftone)" opacity="0.55"/>
+  <polygon points="0,300 86,300 0,470" fill="url(#halftone)" opacity="0.25"/>
+
+  <!-- frame -->
+  <rect x="12" y="12" width="936" height="836" fill="none" stroke="#17131f" stroke-width="2.5"/>
+  <rect x="20" y="20" width="920" height="820" fill="none" stroke="#17131f" stroke-width="1" stroke-dasharray="2 6" opacity="0.30"/>
+  <circle cx="12" cy="12" r="4" fill="#17131f"/>
+  <circle cx="948" cy="12" r="4" fill="#17131f"/>
+  <circle cx="12" cy="848" r="4" fill="#17131f"/>
+  <circle cx="948" cy="848" r="4" fill="#17131f"/>
+
+  <!-- masthead -->
+  <polygon points="36,36 268,36 276,44 276,60 44,60 36,52" fill="#17131f"/>
+  <text x="48" y="51" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" letter-spacing="1.6" fill="#fff8e7">本地优先 · APPLE 原生</text>
+
+  <polygon points="34,62 372,62 380,70 380,100 42,100 34,92" fill="#ffd447" opacity="0.95"/>
+  <polygon points="34,62 372,62 380,70 380,100 42,100 34,92" fill="url(#hatch)"/>
+  <text x="42" y="92" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="34" font-weight="900" letter-spacing="-1.2" fill="#17131f">一台 Mac，一条 CLI。</text>
+  <text x="36" y="124" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="12.5" font-weight="500" fill="#3b3547">把任意 Agent 接到 Apple 日历与提醒事项；数据、权限和审计都留在本机。</text>
+
+  <!-- speech bubble -->
+  <polygon points="668,44 700,30 692,46 930,46 938,54 938,104 930,112 700,112 692,128 700,112 668,112 660,104 660,52" fill="#ff6b4a" stroke="#17131f" stroke-width="3.5" stroke-linejoin="round"/>
+  <text x="682" y="70" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="17" font-weight="900" fill="#17131f">无云端。</text>
+  <text x="682" y="90" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="17" font-weight="900" fill="#17131f">无局域网。</text>
+  <text x="682" y="110" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="17" font-weight="900" fill="#17131f">无 MCP。</text>
+  <g transform="translate(898 78) rotate(9)">
+    <polygon points="0,-26 7,-8 26,-8 11,3 17,22 0,11 -17,22 -11,3 -26,-8 -7,-8" fill="#ffd447" stroke="#17131f" stroke-width="2"/>
+    <text x="0" y="4" text-anchor="middle" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="8.5" font-weight="900" fill="#17131f">100%</text>
+  </g>
+
+  <!-- LAYER 1 -->
+  <polygon points="33,151 937,151 937,287 927,297 33,297 33,161" fill="#17131f" opacity="0.92"/>
+  <polygon points="28,146 932,146 932,282 922,292 28,292 28,156" fill="#fffcf2" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="46,146 200,146 208,154 208,170 54,170 46,162" fill="#17131f"/>
+  <text x="58" y="162" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" letter-spacing="1.5" fill="#fff8e7">01 · 宿主</text>
+
+  <!-- agent card -->
+  <g>
+    <polygon points="49,189 209,189 209,267 199,277 49,277 49,199" fill="#17131f" opacity="0.9"/>
+    <polygon points="44,184 204,184 204,262 194,272 44,272 44,194" fill="#ff6b4a" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="44,184 120,184 44,244" fill="#fff8e7" opacity="0.18"/>
+    <line x1="73" y1="194" x2="73" y2="201" stroke="#17131f" stroke-width="2.5"/>
+    <circle cx="73" cy="193" r="3" fill="#17131f"/>
+    <polygon points="59,201 89,201 94,211 90,235 84,239 62,239 56,235 54,211" fill="#fff8e7" stroke="#17131f" stroke-width="2.5" stroke-linejoin="round"/>
+    <rect x="66" y="212" width="5" height="6" fill="#17131f"/>
+    <rect x="78" y="212" width="5" height="6" fill="#17131f"/>
+    <line x1="67" y1="227" x2="80" y2="227" stroke="#17131f" stroke-width="2"/>
+    <text x="103" y="207" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="15" font-weight="900" fill="#17131f">AGENT</text>
+    <text x="103" y="226" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#17131f">Claude / Codex /</text>
+    <text x="103" y="240" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#17131f">Cursor 等任意宿主</text>
+  </g>
+
+  <!-- skill card -->
+  <g>
+    <polygon points="245,189 405,189 405,267 395,277 245,277 245,199" fill="#17131f" opacity="0.9"/>
+    <polygon points="240,184 400,184 400,262 390,272 240,272 240,194" fill="#ffd447" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="400,184 400,236 352,184" fill="#fff8e7" opacity="0.26"/>
+    <polygon points="257,200 281,200 285,205 285,240 281,244 257,244 253,240 253,205" fill="#fff8e7" stroke="#17131f" stroke-width="2.2" stroke-linejoin="round"/>
+    <line x1="261" y1="210" x2="277" y2="210" stroke="#17131f" stroke-width="2"/>
+    <line x1="261" y1="218" x2="277" y2="218" stroke="#17131f" stroke-width="2"/>
+    <line x1="261" y1="226" x2="271" y2="226" stroke="#17131f" stroke-width="2"/>
+    <text x="299" y="207" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="15" font-weight="900" fill="#17131f">SKILL</text>
+    <text x="299" y="226" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="10" font-weight="600" fill="#17131f">何时 · 为何 · 如何</text>
+    <text x="299" y="240" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="10" font-weight="600" fill="#17131f">随包提供的规则</text>
+  </g>
+
+  <!-- cli card -->
+  <g>
+    <polygon points="441,189 611,189 611,267 601,277 441,277 441,199" fill="#17131f" opacity="0.9"/>
+    <polygon points="436,184 606,184 606,262 596,272 436,272 436,194" fill="#2bb3a3" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="436,184 506,184 436,240" fill="#fff8e7" opacity="0.24"/>
+    <rect x="450" y="201" width="34" height="28" fill="#17131f" stroke="#17131f" stroke-width="2"/>
+    <text x="456" y="219" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9" font-weight="700" fill="#ffd447">&gt;_</text>
+    <text x="495" y="207" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="15" font-weight="900" fill="#17131f">CLI</text>
+    <text x="495" y="224" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8.5" font-weight="700" fill="#17131f">apple-connector</text>
+    <text x="495" y="240" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="10" font-weight="600" fill="#17131f">唯一公开接口</text>
+  </g>
+
+  <!-- host arrows -->
+  <line x1="207" y1="228" x2="234" y2="228" stroke="#17131f" stroke-width="3.5" marker-end="url(#arrow)"/>
+  <line x1="403" y1="228" x2="430" y2="228" stroke="#17131f" stroke-width="3.5" marker-end="url(#arrow)"/>
+
+  <!-- sticky note -->
+  <g transform="rotate(1.2 782 229)">
+    <polygon points="657,187 912,187 918,193 918,272 912,278 657,278 651,272 651,193" fill="#17131f" opacity="0.85"/>
+    <polygon points="652,182 907,182 913,188 913,267 907,273 652,273 646,267 646,188" fill="#fffcf2" stroke="#17131f" stroke-width="2.5" stroke-linejoin="round"/>
+    <polygon points="646,182 913,182 913,206 646,206" fill="url(#halftone)" opacity="0.55"/>
+    <polygon points="748,174 820,174 824,180 816,193 744,193 740,180" fill="#7b5ce5" opacity="0.85" stroke="#17131f" stroke-width="1.6"/>
+    <text x="664" y="201" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8.5" font-weight="700" letter-spacing="1.7" fill="#17131f">运行环境</text>
+    <text x="664" y="224" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="650" fill="#17131f">Apple Silicon · macOS 14+</text>
+    <text x="664" y="242" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="650" fill="#17131f">Node 24.20+ / 26.8+</text>
+    <text x="664" y="260" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="11" font-weight="650" fill="#17131f">单用户 · 单机</text>
+    <circle cx="898" cy="251" r="10" fill="#2bb3a3" stroke="#17131f" stroke-width="2"/>
+    <path d="M893,251 L897,255 L904,247" fill="none" stroke="#17131f" stroke-width="2.2" stroke-linecap="round"/>
+  </g>
+
+  <!-- CLI to core -->
+  <path d="M521,272 L521,326 L330,326 L330,366" fill="none" stroke="#17131f" stroke-width="3.5" stroke-linejoin="round" marker-end="url(#arrow)"/>
+  <polygon points="352,298 494,298 500,304 500,320 352,320 346,314 346,304" fill="#17131f"/>
+  <text x="358" y="313" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8.5" font-weight="700" letter-spacing="0.6" fill="#fff8e7">JSON RPC · UNIX SOCKET</text>
+
+  <!-- LAYER 2 -->
+  <polygon points="33,341 937,341 937,581 927,591 33,591 33,351" fill="#17131f" opacity="0.92"/>
+  <polygon points="28,336 932,336 932,576 922,586 28,586 28,346" fill="#fffcf2" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="46,336 256,336 264,344 264,360 54,360 46,352" fill="#17131f"/>
+  <text x="58" y="352" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" letter-spacing="1.5" fill="#fff8e7">02 · 本地服务</text>
+  <g transform="rotate(-2 810 350)">
+    <text x="922" y="353" text-anchor="end" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8.5" font-weight="700" letter-spacing="1.1" fill="#3b3547">仅本机监听 · 0700 · 无外部端口</text>
+    <line x1="668" y1="357" x2="922" y2="357" stroke="#e8482f" stroke-width="2"/>
+  </g>
+
+  <!-- application core -->
+  <g>
+    <polygon points="49,377 525,377 525,571 515,581 49,581 49,387" fill="#17131f" opacity="0.9"/>
+    <polygon points="44,372 520,372 520,566 510,576 44,576 44,382" fill="#1a1626" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="44,372 248,372 44,506" fill="#2bb3a3" opacity="0.13"/>
+    <polygon points="520,372 520,470 424,372" fill="#7b5ce5" opacity="0.20"/>
+    <polygon points="44,508 140,576 44,576" fill="#ff6b4a" opacity="0.12"/>
+    <text x="68" y="403" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="19" font-weight="900" letter-spacing="-0.2" fill="#fff8e7">应用核心</text>
+    <text x="68" y="420" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8.5" font-weight="700" letter-spacing="1.1" fill="#ffd447">所有调用共用一条策略边界</text>
+
+    <g font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="10.5" font-weight="700" fill="#17131f">
+      <polygon points="68,436 268,436 274,442 274,470 68,470 68,442" fill="#fff8e7" stroke="#17131f" stroke-width="2"/>
+      <text x="82" y="458">Schema + 授权范围</text>
+      <polygon points="290,436 490,436 496,442 496,470 290,470 290,442" fill="#ffd447" stroke="#17131f" stroke-width="2"/>
+      <text x="304" y="458">幂等写入</text>
+      <polygon points="68,480 268,480 274,486 274,514 68,514 68,486" fill="#fff8e7" stroke="#17131f" stroke-width="2"/>
+      <text x="82" y="502">操作记录 + 审计</text>
+      <polygon points="290,480 490,480 496,486 496,514 290,514 290,486" fill="#ffd447" stroke="#17131f" stroke-width="2"/>
+      <text x="304" y="502">回读校验</text>
+    </g>
+    <text x="68" y="548" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="600" fill="#fff8e7" opacity="0.80">每次写入：schema → 授权 → 幂等 → 提交 → 回读</text>
+  </g>
+
+  <!-- management web -->
+  <g>
+    <polygon points="577,377 741,377 741,463 731,473 577,473 577,387" fill="#17131f" opacity="0.9"/>
+    <polygon points="572,372 736,372 736,458 726,468 572,468 572,382" fill="#7b5ce5" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="572,372 640,372 572,432" fill="#fff8e7" opacity="0.18"/>
+    <text x="586" y="394" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="12.5" font-weight="900" fill="#fff8e7">管理页面</text>
+    <text x="586" y="414" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" fill="#ffd447">127.0.0.1</text>
+    <text x="586" y="430" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9.5" font-weight="600" fill="#fff8e7">1 小时后过期</text>
+    <text x="586" y="449" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9" font-weight="600" fill="#fff8e7" opacity="0.82">接入 · 审计 · 文档</text>
+  </g>
+
+  <!-- state -->
+  <g>
+    <polygon points="577,485 917,485 917,571 907,581 577,581 577,495" fill="#17131f" opacity="0.9"/>
+    <polygon points="572,480 912,480 912,566 902,576 572,576 572,490" fill="#ffd447" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="572,480 650,480 572,540" fill="#fff8e7" opacity="0.35"/>
+    <text x="586" y="501" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="12" font-weight="900" fill="#17131f">状态 · ~/.apple-connector</text>
+    <text x="586" y="523" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#17131f">SQLite · 审计 · 凭据 · sockets</text>
+    <text x="586" y="542" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#17131f">仅本人可读 0700 · 无网络监听</text>
+  </g>
+
+  <!-- core links -->
+  <line x1="522" y1="420" x2="568" y2="420" stroke="#17131f" stroke-width="3" marker-start="url(#arrow-start)" marker-end="url(#arrow)"/>
+  <line x1="522" y1="528" x2="568" y2="528" stroke="#17131f" stroke-width="3" marker-start="url(#arrow-start)" marker-end="url(#arrow)"/>
+
+  <!-- LAYER 3 -->
+  <polygon points="33,625 937,625 937,795 927,805 33,805 33,635" fill="#17131f" opacity="0.92"/>
+  <polygon points="28,620 932,620 932,790 922,800 28,800 28,630" fill="#fffcf2" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+  <polygon points="46,620 290,620 298,628 298,644 54,644 46,636" fill="#17131f"/>
+  <text x="58" y="636" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" letter-spacing="1.5" fill="#fff8e7">03 · 原生 / EVENTKIT</text>
+
+  <!-- app boundary -->
+  <g>
+    <polygon points="49,661 381,661 381,777 371,787 49,787 49,671" fill="#17131f" opacity="0.9"/>
+    <polygon points="44,656 376,656 376,772 366,782 44,782 44,666" fill="#ffe4db" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="44,656 152,656 44,744" fill="#ff6b4a" opacity="0.18"/>
+    <text x="62" y="680" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="13" font-weight="900" fill="#17131f">AppleConnector.app</text>
+    <text x="62" y="696" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9.2" font-weight="600" fill="#3b3547">自签名 · 持有 TCC 权限</text>
+    <polygon points="66,713 360,713 360,759 66,759 60,753 60,719" fill="#17131f"/>
+    <polygon points="60,708 354,708 354,754 60,754 54,748 54,714" fill="#ff6b4a" stroke="#17131f" stroke-width="2.5" stroke-linejoin="round"/>
+    <polygon points="54,708 116,708 54,754" fill="#fff8e7" opacity="0.20"/>
+    <text x="72" y="730" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="14" font-weight="900" fill="#17131f">SWIFT HELPER</text>
+    <text x="72" y="746" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9" font-weight="600" fill="#17131f">EventKit 桥接 · Unix socket 上的 JSONL</text>
+  </g>
+
+  <!-- eventkit -->
+  <g>
+    <polygon points="415,693 565,693 565,779 555,789 415,789 415,703" fill="#17131f" opacity="0.9"/>
+    <polygon points="410,688 560,688 560,774 550,784 410,784 410,698" fill="#2bb3a3" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <polygon points="410,688 470,688 410,748" fill="#fff8e7" opacity="0.22"/>
+    <text x="426" y="716" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="14" font-weight="900" fill="#17131f">EVENTKIT</text>
+    <text x="426" y="734" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9" font-weight="600" fill="#17131f">macOS 原生框架</text>
+    <text x="426" y="750" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.5" font-weight="700" fill="#17131f">读取 · 写入 · 回读</text>
+  </g>
+
+  <!-- apple apps -->
+  <g>
+    <polygon points="599,661 917,661 917,777 907,787 599,787 599,671" fill="#17131f" opacity="0.9"/>
+    <polygon points="594,656 912,656 912,772 902,782 594,782 594,666" fill="#fffcf2" stroke="#17131f" stroke-width="3" stroke-linejoin="round"/>
+    <text x="610" y="676" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8.5" font-weight="700" letter-spacing="1.5" fill="#3b3547">APPLE 应用</text>
+
+    <polygon points="612,691 744,691 748,695 748,763 612,763 612,695" fill="#ff6b4a" stroke="#17131f" stroke-width="2.5"/>
+    <rect x="620" y="700" width="22" height="20" fill="#fff8e7" stroke="#17131f" stroke-width="2"/>
+    <rect x="620" y="700" width="22" height="5" fill="#17131f"/>
+    <rect x="624" y="709" width="3" height="3" fill="#17131f"/>
+    <rect x="631" y="709" width="3" height="3" fill="#17131f"/>
+    <rect x="638" y="709" width="3" height="3" fill="#17131f"/>
+    <text x="652" y="708" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="12" font-weight="900" fill="#17131f">日历</text>
+    <text x="652" y="727" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9" font-weight="600" fill="#17131f">完整访问</text>
+    <text x="652" y="746" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="7.5" font-weight="700" fill="#17131f">事件 · 容器</text>
+
+    <polygon points="762,691 894,691 898,695 898,763 762,763 762,695" fill="#ffd447" stroke="#17131f" stroke-width="2.5"/>
+    <rect x="770" y="700" width="22" height="20" fill="#fff8e7" stroke="#17131f" stroke-width="2"/>
+    <path d="M774,706 L777,709 L782,702" fill="none" stroke="#17131f" stroke-width="1.7"/>
+    <path d="M774,716 L777,719 L782,712" fill="none" stroke="#17131f" stroke-width="1.7"/>
+    <text x="802" y="708" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Arial Black, sans-serif" font-size="11.5" font-weight="900" fill="#17131f">提醒事项</text>
+    <text x="802" y="727" font-family="PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, Microsoft YaHei, Helvetica Neue, Arial, sans-serif" font-size="9" font-weight="600" fill="#17131f">完整访问</text>
+    <text x="802" y="746" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="7.5" font-weight="700" fill="#17131f">截止 · 状态</text>
+  </g>
+
+  <!-- native arrows -->
+  <line x1="378" y1="736" x2="402" y2="736" stroke="#17131f" stroke-width="3.5" marker-end="url(#arrow)"/>
+  <line x1="562" y1="736" x2="586" y2="736" stroke="#17131f" stroke-width="3.5" marker-end="url(#arrow)"/>
+
+  <!-- core to helper: drawn last so it stays visible across the app boundary -->
+  <path d="M340,576 L340,702" fill="none" stroke="#17131f" stroke-width="3.5" marker-end="url(#arrow)"/>
+  <rect x="350" y="591" width="66" height="26" fill="#f6efdf"/>
+  <text x="353" y="601" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8" font-weight="700" fill="#17131f">helper.sock</text>
+  <text x="353" y="613" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8" font-weight="700" fill="#e8482f">JSONL · v2</text>
+
+  <!-- footer -->
+  <rect x="28" y="812" width="904" height="28" fill="#17131f"/>
+  <text x="42" y="830" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="9.2" font-weight="600" fill="#fff8e7">写入：prepare → authorize → commit → 回读   ·   结果未知？operation get —— 绝不换 key 重试。</text>
+  <text x="918" y="830" text-anchor="end" font-family="SFMono-Regular, Menlo, Consolas, monospace" font-size="8.5" font-weight="700" fill="#ffd447">v0.17.0</text>
+
+  <!-- sparks -->
+  <g stroke="#17131f" stroke-width="2" stroke-linecap="round">
+    <line x1="930" y1="304" x2="930" y2="314"/>
+    <line x1="925" y1="309" x2="935" y2="309"/>
+    <line x1="40" y1="590" x2="40" y2="600"/>
+    <line x1="35" y1="595" x2="45" y2="595"/>
+  </g>
+</svg>
