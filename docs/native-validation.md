@@ -1,5 +1,7 @@
 # M0 原生能力验证记录
 
+[文档索引](./README_zh.md) · 本页是内部验证记录，按时间追加，不代表当前用户界面。
+
 日期：2026-09-05。此文档区分接口存在、内存运行、真实数据操作与安装验证，不能互相替代。
 
 ## 已执行的无数据检查
@@ -43,7 +45,24 @@ footprint <helper-pid>
 - 修复前对照（同一台机器、旧二进制）：2,000 次 `reminders.list` 最大 RSS 844 MB；包裹 autorelease pool 后稳定在 34.7 MB。
 - 重新构建 helper 后 TCC 可能因代码签名变化要求重新授权。本次重建后的二进制在本机 Terminal 获得持久 Reminders 权限后运行 opt-in 用例；通过 SSH 运行时会因 responsible process 为 `sshd-keygen-wrapper` 而被 macOS 禁止弹窗，应改用已授权的本机 Terminal 或 GUI 会话。
 
+> 上述 TCC 行为属于 v0.16.x 及更早的“宿主 App 持有权限”架构。v0.17.0 起 EventKit helper 运行在自签名 `AppleConnector.app` 中，权限归 Apple Connector；重建/升级不再因为 helper 的 cdhash 变化而丢失授权。见下文 v0.17.0 记录和 [system-permissions_zh.md](./system-permissions_zh.md)。
+
 长期运行排查时，`ps` 的 RSS 可能因页面换出而严重低估占用，应使用 `footprint <pid>` 或 `vmmap -summary <pid>` 查看 physical footprint 与 swapped_out。发布修复版本后必须重启现有服务，旧进程不会自动回收已累积的内存。
+
+## 2026-11-19 v0.17.0 App 权限宿主与 socket 验证
+
+v0.17.0 把 EventKit helper 放进 `AppleConnector.app`，由 LaunchServices 启动，Node 服务通过用户私有 Unix socket 调用它。验证记录：
+
+- **对照实验（无个人数据）**：新编译的 ad-hoc EventKit 状态探针从 OpenCode 启动时返回 `calendar=0 reminders=3`，与 helper、osascript 一致，证明旧架构继承宿主权限。
+- **独立 App 身份**：最小 `.app` 通过 `open` 启动后返回 `0/0`，说明 bundle 取得自己的 TCC 身份。
+- **v0.17.0 App**：以 `open -n dist/native/AppleConnector.app --args --socket <tmp>/helper.sock` 启动后，socket 返回 `hello`（`protocolVersion=2`、`helperVersion=0.17.0`）和 `permissions.status`，且 `calendar/reminders` 均为 `not_determined`，不再继承 OpenCode 的提醒事项授权。
+- **socket 权限**：socket 文件为 `srw-------`，pid/log 为 `0600`，父目录为 `0700`；SIGTERM 后由生命周期清理残留 socket/pid。
+- **生命周期**：临时 state dir 下 `startService` 同时启动 helper 与 Node，`stopService` 同时停止两者；`APPLE_CONNECTOR_HELPER_MODE=direct` 在无 GUI/CI 下走同一 socket 协议。
+- **ad-hoc 对照**：以上 App 验证使用 `APPLE_CONNECTOR_ALLOW_ADHOC=1`。ad-hoc App 每次重建都会更换身份，因此**不能**用于验证跨重建持久性。
+- **自签名签名链**：用临时钥匙串创建一天期自签名代码签名证书，`APPLE_CONNECTOR_SIGN_IDENTITY` 构建成功；`codesign -d -r-` 输出 `identifier "com.jachy.apple-connector" and certificate leaf = H"…"`，不含 `cdhash`；`codesign --verify --strict` 通过。测试钥匙串已删除，钥匙串搜索列表已恢复。
+- **正式签名**：用户创建 `JachyCertificate` 后，`dist/native/AppleConnector.app` 以该身份签名；`codesign -dv` 显示 `Authority=JachyCertificate`，requirement 为 `certificate leaf = H"de6f460690a400eba95188ce574388b1102373ea"`；通过 `open` 临时 socket 启动后 `permissions.status` 为 `not_determined/not_determined`，说明签名 App 可独立运行且未继承宿主权限。
+
+**待授权用户执行**：用户已创建 `JachyCertificate` 并用它签名 App（见 [v0.17.0 进度](./v0.17.0-progress.md)）。仍需在本机 GUI 会话完成一次日历授权；随后用同一证书重建 App（cdhash 变化）并重启，确认 `permissions.status` 仍为 `full_access`，再把 App 复制到另一路径启动确认 bundle id + 证书身份与路径无关。该步骤完成前，不宣称 TCC 持久性已在实机通过。证书创建与验证步骤见 [signing_zh.md](./signing_zh.md)。
 
 ## 公开接口检查
 
@@ -75,14 +94,35 @@ footprint <helper-pid>
 | Apple App 超时但实际写入完成的对账 | 已复现：M0/M1 返回超时后，Reminders UI 可见 UUID 对象；按 UUID 精确清理并按稳定 ID 回读通过 |
 | DST、跨时区、日期-only 保存后往返 | 未执行 |
 | Notes 简单 HTML/纯文本创建后往返 | 未执行 |
-| 终端启动 vs CLI Agent 调用的权限归属 | 未执行 |
-| 后台用户进程启动与重启 | 未执行 |
+| 终端启动 vs CLI Agent 调用的权限归属 | v0.17.0 已验证：旧架构归宿主；新架构归 `AppleConnector.app`，见 2026-11-19 记录 |
+| 后台用户进程启动与重启 | v0.17.0 已验证 helper 由 LaunchServices 启动、socket 握手与生命周期清理；跨重建持久性待授权验收 |
 | Formula 全新安装、版本路径变化与升级 | 未执行 |
 | Intel 与其他 macOS 版本 | 未执行 |
 
 真实测试只操作明确授权的测试容器和明确标注的测试对象，不自动全库枚举、不修改用户已有内容、不重置 TCC、不删除系统或用户数据。测试清理也必须有明确对象范围。
 
 2026-09-06：M1 探针改为由调用方在写入前保留 UUID，以便 unknown outcome 后精确恢复。早期恢复只查原始标题，曾对 `5f79e1ab-7e5f-43a5-973a-156114c5843e` 错误返回 `removed: false`；界面复核证明该对象已改名且仍存在。v0.2.0 恢复实现同时精确匹配原始/更新标题、优先使用稳定 ID、拒绝歧义，并在删除后按稳定 ID 回读。
+
+## 2026-11-15 v0.10.0 due、patch 与重复提醒验证
+
+v0.10.0 将 native helper 的 JSONL 协议升级为 2，`reminders.list` 的 `due` 从字符串改为结构化对象，并增加 `recurring`。在专用 `Agents` 列表（`D4DD0F18-98A9-408F-932F-49001E9653F6`）用一次性 Swift/Node 探针验证：
+
+- date-only：`dueDateComponents` 只有年月日，hour/minute/second 为 nil，timeZone 为 nil；direct 与 list fetch 一致。
+- instant：`Asia/Shanghai` 的 `2032-03-01 17:30:00` 在保存、换新进程和 list fetch 后保留时分秒与 `Asia/Shanghai`。
+- floating：`2032-03-02 18:45:00` 无时区写入后读回仍为 floating。
+- 类型转换：instant→date、instant→floating、date→instant、floating→instant、instant→null 均可通过 `reminders.patchVerified` 完成。
+- 关键 EventKit 行为：把已存在的 date-only/floating 改为 instant 时，必须在设置 `dueDateComponents` 之后显式设置 `reminder.timeZone`，否则时区会被丢弃并读回 floating。helper 已按此顺序实现。
+- ID：date/instant/floating 在 create、list、patch、complete、delete 全链路保持一致；删除后不再出现。
+- 重复提醒：带 due date 的 daily recurrence 探针返回 `recurring=true`；patch/complete/delete 均返回 `unsupported_operation`，诊断清理失败会显式报错。
+
+回归检查方法：
+
+```sh
+npm run build
+APPLE_CONNECTOR_REMINDERS_TEST_LIST_ID='<专用测试列表 ID>' node --test dist/tests/native/reminders.test.js
+```
+
+这些用例会写入并清理专用测试列表中的 UUID 探针。TCC 授权与测试仍应从本机 Terminal 运行；当前 SSH 会话直接执行 `dist/native/apple-connector-helper` 会被系统以 SIGKILL 结束（exit 137），从 `native/.build/release/` 或临时副本执行正常，属于宿主启动归属限制，不是 helper 逻辑错误。
 
 ## 2026-09-06 v0.2.0 原生复核
 

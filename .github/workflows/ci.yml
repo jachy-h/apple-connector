@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# CI builds are throwaway test builds. Never publish an artifact built here:
+# release builds must use the local self-signed identity so TCC grants survive upgrades.
+env:
+  APPLE_CONNECTOR_ALLOW_ADHOC: '1'
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

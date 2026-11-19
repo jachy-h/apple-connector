@@ -11,6 +11,7 @@ export class JxaReminderWriter implements ReminderWriter {
   }
 
   async create(input: CreateReminder): Promise<ReminderReceipt> {
+    if (input.due?.kind === 'floating') throw new ConnectorError('unsupported_operation', 'The legacy JXA writer does not support floating due dates.');
     const result = await this.runner.run('reminders.create', { change: input });
     if (!result || typeof result !== 'object') throw new ConnectorError('protocol_error', 'Native writer returned an invalid receipt.');
     const receipt = result as Record<string, unknown>;

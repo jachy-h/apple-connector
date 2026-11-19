@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseDueInput } from '../src/cli/due.js';
+import { parseDueInput, parseDuePatch } from '../src/cli/due.js';
 
 test('parseDueInput returns empty object without due flags', () => {
   assert.deepEqual(parseDueInput(['--list-id', 'x', '--title', 'y']), {});
@@ -46,4 +46,19 @@ test('parseDueInput rejects malformed --due-date', () => {
 
 test('parseDueInput rejects invalid --time-zone', () => {
   assert.throws(() => parseDueInput(['--due', '2026-10-06T14:00:00+08:00', '--time-zone', 'Mars/Olympus']), { code: 'invalid_request' });
+});
+
+test('parseDuePatch returns null for --clear-due', () => {
+  assert.deepEqual(parseDuePatch(['--clear-due']), { due: null });
+});
+
+test('parseDuePatch preserves due flags for patch', () => {
+  assert.deepEqual(parseDuePatch(['--due', '2026-10-06T14:00:00+08:00']), {
+    due: { kind: 'instant', at: '2026-10-06T14:00:00+08:00', timeZone: 'Asia/Shanghai' },
+  });
+});
+
+test('parseDuePatch rejects --clear-due together with a due value', () => {
+  assert.throws(() => parseDuePatch(['--clear-due', '--due', '2026-10-06T14:00:00+08:00']), { code: 'invalid_request' });
+  assert.throws(() => parseDuePatch(['--clear-due', '--due-date', '2026-10-06']), { code: 'invalid_request' });
 });

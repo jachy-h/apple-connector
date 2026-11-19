@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createCalendarEventSchema } from '../src/providers/calendar/types.js';
-import { dueSchema } from '../src/providers/reminders/types.js';
+import { dueSchema, patchReminderSchema } from '../src/providers/reminders/types.js';
 import { calendarListEventsSchema, validationMessage } from '../src/transports/validation.js';
 
 test('shared instant contract accepts RFC 3339 offsets with optional fractional seconds', () => {
@@ -10,6 +10,19 @@ test('shared instant contract accepts RFC 3339 offsets with optional fractional 
   }
   assert.equal(createCalendarEventSchema.safeParse({ kind: 'calendar.create', containerId: 'calendar', title: 'Test', start: '2026-09-07T00:00:00Z', end: '2026-09-07T01:00:00Z', allDay: false }).success, true);
   assert.equal(dueSchema.safeParse({ kind: 'instant', at: '2026-09-07T00:00:00+08:00', timeZone: 'Asia/Shanghai' }).success, true);
+  assert.equal(dueSchema.safeParse({ kind: 'floating', date: '2026-09-07', time: '17:00' }).success, true);
+  assert.equal(dueSchema.safeParse({ kind: 'floating', date: '2026-09-07', time: '17:00:30' }).success, true);
+  assert.equal(dueSchema.safeParse({ kind: 'floating', date: '2026-09-07', time: '24:00' }).success, false);
+});
+
+test('patch schema requires at least one field and supports due clearing', () => {
+  const base = { kind: 'reminders.patch', containerId: 'list', id: 'reminder' };
+  assert.equal(patchReminderSchema.safeParse(base).success, false);
+  assert.equal(patchReminderSchema.safeParse({ ...base, due: null }).success, true);
+  assert.equal(patchReminderSchema.safeParse({ ...base, body: '' }).success, true);
+  assert.equal(patchReminderSchema.safeParse({ ...base, completed: false }).success, true);
+  assert.equal(patchReminderSchema.safeParse({ ...base, due: { kind: 'floating', date: '2026-09-07', time: '17:00' } }).success, true);
+  assert.equal(patchReminderSchema.safeParse({ ...base, unexpected: true }).success, false);
 });
 
 test('shared validation rejects timezone-less and non-increasing instants without echoing content', () => {

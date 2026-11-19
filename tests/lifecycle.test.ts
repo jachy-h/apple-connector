@@ -8,6 +8,7 @@ import { acquireServiceLock, releaseServiceLock, statePaths } from '../src/trans
 
 const dir = mkdtempSync(join(tmpdir(), 'apple-connector-lifecycle-'));
 process.env.APPLE_CONNECTOR_STATE_DIR = dir;
+process.env.APPLE_CONNECTOR_HELPER_MODE = 'direct';
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 test('status reports stopped before setup', () => {
@@ -52,6 +53,8 @@ test('start spawns the detached service, then stop shuts it down and removes the
   const running = status();
   assert.equal(running.running, true);
   assert.ok(running.pid !== null && Number.isInteger(running.pid));
+  assert.equal(running.helper.running, true);
+  assert.ok(running.helper.pid !== null && Number.isInteger(running.helper.pid));
   assert.equal(running.managementAddress, null);
   assert.deepEqual(await health(), { healthy: true });
   const management = await openManagementWeb();
@@ -63,4 +66,6 @@ test('start spawns the detached service, then stop shuts it down and removes the
   const stopped = status();
   assert.equal(stopped.running, false);
   assert.equal(stopped.pid, null);
+  assert.equal(stopped.helper.running, false);
+  assert.equal(stopped.helper.pid, null);
 });

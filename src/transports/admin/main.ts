@@ -3,10 +3,10 @@ import { fileURLToPath } from 'node:url';
 import { HttpServiceClient } from '../local/client.js';
 import { rpcFail, rpcOk } from '../local/rpc.js';
 import type { RpcMethod } from '../local/rpc.js';
-import { readAdminToken, statePaths, writeClientToken } from '../local/paths.js';
+import { clientTokenFile, migrateLegacyStateSync, readAdminToken, statePaths, writeClientToken } from '../local/paths.js';
 import { AdminWebServer } from './server.js';
 
-const paths = statePaths();
+const paths = (() => { migrateLegacyStateSync(); return statePaths(); })();
 const expiresAt = Number.parseInt(process.env.APPLE_CONNECTOR_WEB_EXPIRES_AT ?? '', 10);
 if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) throw new Error('Invalid management web expiry.');
 const token = readAdminToken(paths);
@@ -15,23 +15,19 @@ const facade = { async management(method: RpcMethod, params: unknown) {
   try {
     const request = (params ?? {}) as Record<string, unknown>;
     if (method === 'clients.create') {
-      const onboardingId = typeof request.onboardingId === 'string' ? request.onboardingId : undefined;
-      const { onboardingId: _onboardingId, ...clientRequest } = request;
-      const created = await client.request(method, clientRequest, token) as { client: { id: string; name: string }; token: string };
+      const created = await client.request(method, request, token) as { client: { id: string; name: string }; token: string };
       const credentialDir = `${paths.dir}/profiles`;
       mkdirSync(credentialDir, { recursive: true, mode: 0o700 });
       try { chmodSync(credentialDir, 0o700); } catch { /* best effort */ }
-      const credentialFile = `${credentialDir}/${created.client.id}.token`;
+      const credentialFile = clientTokenFile(paths, created.client.id);
       writeClientToken(credentialFile, created.token);
-      if (onboardingId) await client.request('onboarding.complete', { id: onboardingId, clientId: created.client.id, credentialFile }, token);
-      return rpcOk({ client: created.client, credentialFile });
+      return rpcOk({ client: created.client, token: created.token, credentialFile, credentialKey: created.client.id });
     }
-    if (method === 'clients.rotate') {
-      const rotated = await client.request(method, request, token) as { client: { id: string; name: string }; token: string };
-      const credentialFile = `${paths.dir}/profiles/${rotated.client.id}.token`;
+    if (method === 'clients.delete') {
+      const deleted = await client.request(method, request, token) as { id: string };
+      const credentialFile = clientTokenFile(paths, deleted.id);
       try { rmSync(credentialFile, { force: true }); } catch { /* best effort */ }
-      writeClientToken(credentialFile, rotated.token);
-      return rpcOk({ client: rotated.client, credentialFile });
+      return rpcOk(deleted);
     }
     return rpcOk(await client.request(method, request, token));
   }

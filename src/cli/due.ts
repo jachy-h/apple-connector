@@ -33,7 +33,10 @@ function timeZoneForOffset(at: string): string {
   return OFFSET_TO_TZ[match[1]!] ?? 'UTC';
 }
 
-export type DueInput = { kind: 'instant'; at: string; timeZone: string } | { kind: 'date'; date: string };
+export type DueInput =
+  | { kind: 'instant'; at: string; timeZone: string }
+  | { kind: 'date'; date: string }
+  | { kind: 'floating'; date: string; time: string };
 
 /**
  * Parse reminder due-date flags from CLI args: --due <RFC 3339> (timed) or
@@ -61,4 +64,16 @@ export function parseDueInput(rest: string[]): { due?: DueInput } {
     return { due: { kind: 'instant', at, timeZone } };
   }
   return {};
+}
+
+/**
+ * Parse the due portion of `reminder patch`: --due/--due-date set a value,
+ * --clear-due removes it, and the three flags are mutually exclusive.
+ */
+export function parseDuePatch(rest: string[]): { due?: DueInput | null } {
+  const clear = rest.includes('--clear-due');
+  const parsed = parseDueInput(rest);
+  if (clear && parsed.due) throw new ConnectorError('invalid_request', 'Use either --clear-due or --due/--due-date, not both.');
+  if (clear) return { due: null };
+  return parsed;
 }

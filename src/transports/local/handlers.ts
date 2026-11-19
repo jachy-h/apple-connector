@@ -6,7 +6,7 @@ import { NoteOperations } from '../../operations/notes.js';
 import { JxaNoteReader } from '../../providers/notes/jxa-reader.js';
 import type { ReminderReader } from '../../providers/reminders/eventkit.js';
 import type { CalendarReader } from '../../providers/calendar/eventkit.js';
-import { authorize, projectCalendarEvent } from '../../policy/authorize.js';
+import { authorize } from '../../policy/authorize.js';
 import type { Client, Grant } from '../../policy/schema.js';
 import { rpcOk, rpcFail, agentMethods, adminMethods, localAdminMethods } from './rpc.js';
 import type { RpcMethod, RpcResponse } from './rpc.js';
@@ -20,7 +20,6 @@ interface AgentOperationService {
   submit?(token: string, params: unknown): unknown | Promise<unknown>;
   commit(token: string, id: string): Promise<unknown>;
   get(token: string, id: string): unknown;
-  approve(id: string): void;
 }
 
 const operationRefParamsSchema = operationRefSchema;
@@ -28,15 +27,18 @@ const pageSchema = z.object({ offset: z.number().int().min(0).max(20_000).defaul
 const operationQuerySchema = pageSchema.extend({ provider: z.enum(['calendar', 'reminders', 'notes']).optional(), clientId: z.string().min(1).max(128).optional(), state: z.string().min(1).max(64).optional() });
 const auditQuerySchema = pageSchema.extend({ provider: z.enum(['calendar', 'reminders', 'notes']).optional(), clientId: z.string().min(1).max(128).optional(), source: z.enum(['client', 'web']).optional(), outcome: z.enum(['allowed', 'denied', 'succeeded', 'failed', 'outcome_unknown']).optional(), from: z.number().int().nonnegative().optional(), to: z.number().int().nonnegative().optional() }).superRefine((value, context) => { if (value.from !== undefined && value.to !== undefined && value.from > value.to) context.addIssue({ code: 'custom', message: 'The start time must not be after the end time.' }); });
 const containerSchema = z.object({ containerId: z.string().min(1).max(512) }).strict();
+const agentVerifySchema = z.object({ agent: z.string().trim().min(1).max(100) }).strict();
 const probeSchema = z.object({ probeId: z.string().uuid() }).strict();
 const permissionRequestSchema = z.object({ provider: z.enum(['calendar', 'reminders']) }).strict();
 const containerNameSchema = z.object({ name: z.string().trim().min(1).max(500) }).strict();
+const auditLaneRefSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('client'), clientId: z.string().min(1).max(128) }).strict(),
+  z.object({ kind: z.literal('web') }).strict(),
+]);
 const readSummarySchema = z.object({ clientId: z.string().uuid(), provider: z.literal('reminders'), containerId: z.string().min(1).max(512), limit: z.number().int().min(1).max(20).default(10) }).strict();
 const webCalendarSchema = calendarListEventsSchema;
 const webReminderSchema = remindersListSchema;
 const webWriteSchema = z.object({ idempotencyKey: z.string().uuid(), change: z.unknown() }).strict();
-const onboardingIdSchema = z.object({ id: z.string().uuid() }).strict();
-const onboardingCompleteSchema = z.object({ id: z.string().uuid(), clientId: z.string().uuid(), credentialFile: z.string().min(1).max(4096) }).strict();
 const notesMethod = (method: RpcMethod) => method.startsWith('notes.') || method.startsWith('web.notes.');
 const notesUnavailable = () => new ConnectorError('unsupported_operation', 'Apple Notes is unavailable in v0.8.4.');
 
@@ -110,30 +112,62 @@ export class ServiceFacade {
       this.store.authenticate(token);
       switch (method) {
         case 'capabilities': return rpcOk({ version: this.version, capabilities: capabilities() });
+        case 'auth.describe': {
+          const client = this.store.authenticate(token);
+          const expiresAt = client.grants.length ? Math.min(...client.grants.map((grant) => grant.expiresAt)) : 0;
+          return rpcOk({ name: client.name, grants: client.grants, expiresAt, lastUsedAt: client.lastUsedAt, agentName: client.agentName, verifiedAt: client.verifiedAt });
+        }
+        case 'auth.verify': {
+          const client = this.store.authenticate(token);
+          const { agent } = agentVerifySchema.parse(params);
+          const verified = this.store.verifyClient(client.id, agent);
+          this.store.audit({ at: Date.now(), clientId: client.id, action: 'agent_verified', outcome: 'allowed', count: 0, policyVersion: client.policyVersion });
+          const expiresAt = verified.grants.length ? Math.min(...verified.grants.map((grant) => grant.expiresAt)) : 0;
+          return rpcOk({ name: verified.name, agentName: verified.agentName, verifiedAt: verified.verifiedAt, expiresAt });
+        }
         case 'calendar.list_calendars': {
           const client = this.store.authenticate(token);
           const scopes = [...new Set(client.grants.filter((grant) => grant.provider === 'calendar' && grant.actions.includes('read') && grant.expiresAt > Date.now()).flatMap((grant) => grant.containerIds))];
           const groups = await Promise.all(scopes.map(async (scope) => ({ scope, items: await this.calendarsReader().listCalendars(scope === '*' ? [] : [scope]) })));
           if (groups.some(({ scope, items }) => scope !== '*' && items.length > 1)) throw new ConnectorError('conflict', 'A Calendar name scope is ambiguous; select and authorize its EventKit ID explicitly.');
-          return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()]);
+          return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()].map(({ id, name }) => ({ id, name })));
         }
         case 'calendar.list_events': {
           const parsed = calendarListEventsSchema.parse(params);
-          const client = this.store.authenticate(token); const grant = await this.calendarGrant(client, parsed.calendarId);
-          const page = await this.calendarsReader().listEvents(parsed.calendarId, parsed.from, parsed.to, parsed.offset, parsed.limit);
-          return rpcOk({ items: page.items.map((event) => projectCalendarEvent(event, grant.fields)), nextOffset: page.nextOffset });
+          const client = this.store.authenticate(token);
+          const startedAt = Date.now();
+          try {
+            await this.calendarGrant(client, parsed.calendarId);
+            const page = await this.calendarsReader().listEvents(parsed.calendarId, parsed.from, parsed.to, parsed.offset, parsed.limit);
+            this.store.audit({ at: Date.now(), clientId: client.id, provider: 'calendar', action: 'read', target: parsed.calendarId, outcome: 'allowed', count: page.items.length, durationMs: Date.now() - startedAt, policyVersion: client.policyVersion });
+            return rpcOk({ items: page.items, nextOffset: page.nextOffset });
+          } catch (error) {
+            const errorCode = error instanceof ConnectorError ? error.code : 'service_unavailable';
+            this.store.audit({ at: Date.now(), clientId: client.id, provider: 'calendar', action: 'read', target: parsed.calendarId, outcome: errorCode === 'permission_denied' ? 'denied' : 'failed', count: 0, durationMs: Date.now() - startedAt, errorCode });
+            throw error;
+          }
         }
         case 'reminders.list_lists': {
           const client = this.store.authenticate(token);
           const scopes = [...new Set(client.grants.filter((grant) => grant.provider === 'reminders' && grant.actions.includes('read') && grant.expiresAt > Date.now()).flatMap((grant) => grant.containerIds))];
           const groups = await Promise.all(scopes.map(async (scope) => ({ scope, items: await this.remindersReader().listLists(scope === '*' ? [] : [scope]) })));
           if (groups.some(({ scope, items }) => scope !== '*' && items.length > 1)) throw new ConnectorError('conflict', 'A Reminders name scope is ambiguous; select and authorize its EventKit ID explicitly.');
-          return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()]);
+          return rpcOk([...new Map(groups.flatMap(({ items }) => items).map((item) => [item.id, item])).values()].map(({ id, name }) => ({ id, name })));
         }
         case 'reminders.list': {
           const parsed = remindersListSchema.parse(params);
-          const client = this.store.authenticate(token); await this.reminderGrant(client, parsed.listId);
-          return rpcOk(await this.remindersReader().list(parsed.listId, parsed.offset, parsed.limit));
+          const client = this.store.authenticate(token);
+          const startedAt = Date.now();
+          try {
+            await this.reminderGrant(client, parsed.listId);
+            const page = await this.remindersReader().list(parsed.listId, parsed.offset, parsed.limit);
+            this.store.audit({ at: Date.now(), clientId: client.id, provider: 'reminders', action: 'read', target: parsed.listId, outcome: 'allowed', count: page.items.length, durationMs: Date.now() - startedAt, policyVersion: client.policyVersion });
+            return rpcOk(page);
+          } catch (error) {
+            const errorCode = error instanceof ConnectorError ? error.code : 'service_unavailable';
+            this.store.audit({ at: Date.now(), clientId: client.id, provider: 'reminders', action: 'read', target: parsed.listId, outcome: errorCode === 'permission_denied' ? 'denied' : 'failed', count: 0, durationMs: Date.now() - startedAt, errorCode });
+            throw error;
+          }
         }
         case 'operations.prepare': {
           const change = params && typeof params === 'object' ? (params as { change?: { kind?: unknown } }).change : undefined;
@@ -161,7 +195,7 @@ export class ServiceFacade {
     } catch (error) { return rpcFail(error); }
   }
 
-  /** Management requests require the local admin token held by setup/CLI/web. */
+  /** Management requests require the local admin token held by the CLI/web. */
   async admin(method: RpcMethod, params: unknown, token: string): Promise<RpcResponse> {
     try {
       if (!safeEqualToken(token, this.adminToken)) throw new ConnectorError('permission_denied', 'Invalid admin session.');
@@ -184,34 +218,9 @@ export class ServiceFacade {
       switch (method) {
         case 'clients.list': return rpcOk(this.store.listClients());
         case 'clients.create': return rpcOk(this.store.createClient(params));
-        case 'clients.update': {
-          const parsed = z.object({ id: z.string().min(1).max(128), name: z.string(), grants: z.array(z.unknown()) }).strict().parse(params);
-          return rpcOk(this.store.updateClient(parsed.id, { name: parsed.name, grants: parsed.grants }));
-        }
-        case 'clients.rotate': {
+        case 'clients.delete': {
           const { id } = operationRefParamsSchema.parse(params);
-          return rpcOk(this.store.rotateClientToken(id));
-        }
-        case 'clients.revoke': {
-          const { id } = operationRefParamsSchema.parse(params);
-          this.store.revoke(id);
-          return rpcOk({ revoked: id });
-        }
-        case 'operations.approve': {
-          const { id } = operationRefParamsSchema.parse(params);
-          if (this.store.operationProvider(id) === 'notes') throw notesUnavailable();
-          this.operations.approve(id);
-          return rpcOk({ approved: id });
-        }
-        case 'operations.reject': {
-          const { id } = operationRefParamsSchema.parse(params);
-          this.store.rejectOperation(id);
-          return rpcOk({ rejected: id });
-        }
-        case 'operations.preview': {
-          const { id } = operationRefParamsSchema.parse(params);
-          if (this.store.operationProvider(id) === 'notes') throw notesUnavailable();
-          return rpcOk(this.store.operationPreview(id));
+          return rpcOk(this.store.deleteClient(id));
         }
         case 'audit.list': return rpcOk(this.store.auditEvents());
         case 'audit.query': return rpcOk(this.store.queryAudit(auditQuerySchema.parse(params)));
@@ -220,6 +229,7 @@ export class ServiceFacade {
           this.store.clearAudit();
           return rpcOk({ cleared: true });
         }
+        case 'audit.delete_lane': return rpcOk(this.store.deleteAuditLane(auditLaneRefSchema.parse(params)));
         case 'operations.list': return rpcOk(this.store.listOperations());
         case 'operations.query': return rpcOk(this.store.queryOperations(operationQuerySchema.parse(params)));
         case 'diagnostics.summary': return rpcOk({
@@ -267,7 +277,7 @@ export class ServiceFacade {
           authorize(client, parsed.data.provider, parsed.data.containerId, 'read');
           const result = await this.remindersReader().list(parsed.data.containerId, 0, parsed.data.limit);
           const count = Array.isArray(result) ? result.length : result.items.length;
-          this.store.audit({ at: Date.now(), clientId: client.id, provider: parsed.data.provider, action: 'read', outcome: 'allowed', count, policyVersion: client.policyVersion });
+          this.store.audit({ at: Date.now(), clientId: client.id, provider: parsed.data.provider, action: 'read', target: parsed.data.containerId, outcome: 'allowed', count, policyVersion: client.policyVersion });
           return rpcOk({ provider: parsed.data.provider, containerId: parsed.data.containerId, count, ...(Array.isArray(result) || result.nextOffset === null ? {} : { nextOffset: result.nextOffset }), limitedTo: parsed.data.limit, contentReturned: false });
         }
         // These endpoints are deliberately available only through the authenticated loopback
@@ -359,21 +369,6 @@ export class ServiceFacade {
         case 'management.issue_link': {
           if (!this.issueManagementLink) throw new ConnectorError('service_unavailable', 'Management site is not configured.');
           return rpcOk({ url: this.issueManagementLink() });
-        }
-        case 'onboarding.create': {
-          const expiresAt = z.object({ expiresAt: z.number().int().positive() }).strict().parse(params).expiresAt;
-          return rpcOk(this.store.createOnboarding(expiresAt));
-        }
-        case 'onboarding.status': {
-          const onboarding = this.store.onboarding(onboardingIdSchema.parse(params).id);
-          if (onboarding.state !== 'configured') return rpcOk({ id: onboarding.id, state: onboarding.state, expiresAt: onboarding.expiresAt });
-          const client = this.store.client(onboarding.clientId!);
-          return rpcOk({ id: onboarding.id, state: 'configured', expiresAt: onboarding.expiresAt, clientId: client.id, profileName: client.name, grants: client.grants, credentialFile: onboarding.credentialFile });
-        }
-        case 'onboarding.complete': {
-          const parsed = onboardingCompleteSchema.parse(params);
-          this.store.completeOnboarding(parsed.id, parsed.clientId, parsed.credentialFile);
-          return rpcOk({ id: parsed.id, state: 'configured' });
         }
       }
       throw new ConnectorError('invalid_request', 'Unhandled admin method.');

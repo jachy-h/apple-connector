@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { request } from 'node:http';
 import { Store } from '../src/storage/database.js';
 import { ConnectorError } from '../src/application/errors.js';
-import { ReminderOperations } from '../src/operations/reminders.js';
+import { AgentOperations } from '../src/operations/agent.js';
 import { HttpServiceClient } from '../src/transports/local/client.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
 import type { ManagementDiagnostics } from '../src/transports/local/handlers.js';
@@ -28,11 +28,12 @@ async function fixture(options: { writer?: ReminderWriter; diagnostics?: Managem
   const dir = mkdtempSync(join(tmpdir(), 'apple-connector-test-'));
   const paths: StatePaths = {
     dir, db: join(dir, 'db.sqlite3'), adminTokenFile: join(dir, 'admin-token'),
-    socket: join(dir, 'service.sock'), pidFile: join(dir, 'service.pid'), serviceLock: join(dir, 'service.lock'), adminUrlFile: join(dir, 'admin-url'), webPidFile: join(dir, 'web.pid'), webExpiresAtFile: join(dir, 'web-expires-at'), logFile: join(dir, 'service.log'),
+    socket: join(dir, 'service.sock'), pidFile: join(dir, 'service.pid'), serviceLock: join(dir, 'service.lock'), adminUrlFile: join(dir, 'admin-url'), webPidFile: join(dir, 'web.pid'), webExpiresAtFile: join(dir, 'web-expires-at'),
+    helperSocket: join(dir, 'helper.sock'), helperPidFile: join(dir, 'helper.pid'), helperLogFile: join(dir, 'helper.log'), logFile: join(dir, 'service.log'),
   };
   const adminToken = loadOrCreateAdminToken(paths);
   const store = new Store(paths.db);
-  const operations = new ReminderOperations(store, options.writer ?? m0GateWriter);
+  const operations = new AgentOperations(store, options.writer ?? m0GateWriter);
   const server = LocalServer.create({ socketPath: paths.socket, facade: new ServiceFacade(store, operations, adminToken, 'test-version', undefined, undefined, undefined, options.calendarReader, undefined, options.diagnostics) });
   await server.listen();
   const client = new HttpServiceClient(paths.socket);
@@ -45,10 +46,10 @@ async function fixture(options: { writer?: ReminderWriter; diagnostics?: Managem
 
 const closeFixture = async (f: Fixture) => { await f.server.close(); f.store.close(); rmSync(f.dir, { recursive: true, force: true }); };
 
-async function pairClient(f: Fixture, approval: 'automatic' | 'required' = 'automatic'): Promise<{ id: string; token: string }> {
+async function pairClient(f: Fixture): Promise<{ id: string; token: string }> {
   const created = await f.admin('clients.create', {
     name: 'Test agent',
-    grants: [{ provider: 'reminders', containerIds: ['test-list'], actions: ['create'], fields: 'full', approval, expiresAt: Date.now() + 3600_000 }],
+    grants: [{ provider: 'reminders', containerIds: ['test-list'], actions: ['create'], expiresAt: Date.now() + 3600_000 }],
   }) as { client: { id: string }; token: string };
   return { id: created.client.id, token: created.token };
 }
@@ -98,7 +99,7 @@ test('capabilities reports Notes as unavailable with no operations', async (t) =
   assert.deepEqual(result.capabilities.map((c) => c.provider), ['calendar', 'reminders', 'notes']);
   assert.deepEqual(result.capabilities.map((c) => c.status), ['available', 'available', 'unavailable']);
   assert.deepEqual(result.capabilities[0]?.operations, ['list_calendars', 'list_events', 'create', 'update', 'delete']);
-  assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create', 'update', 'complete', 'delete']);
+  assert.deepEqual(result.capabilities[1]?.operations, ['list_lists', 'list', 'create', 'update', 'patch', 'complete', 'delete']);
   assert.deepEqual(result.capabilities[2]?.operations, []);
 });
 
@@ -157,37 +158,45 @@ test('web calendar failures retain the native permission error code in audit met
   assert.equal(audit.at(-1)?.errorCode, 'permission_denied');
 });
 
-test('management can replace policy, rotate credentials, and read metadata-only diagnostics', async (t) => {
+test('management can describe an authorization and read metadata-only diagnostics', async (t) => {
   const f = await fixture();
   t.after(() => closeFixture(f));
-  const created = await pairClient(f, 'required');
-  const plan = await f.agent(created.token, 'operations.prepare', { idempotencyKey: 'policy-plan', change: { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE' } }) as { id: string };
-  const updated = await f.admin('clients.update', { id: created.id, name: 'Narrowed', grants: [] }) as { name: string; policyVersion: number };
-  assert.deepEqual(updated, { id: created.id, name: 'Narrowed', grants: [], policyVersion: 2, revoked: false });
-  const rows = await f.admin('operations.list') as Array<{ id: string; state: string }>;
-  assert.equal(rows.find((row) => row.id === plan.id)?.state, 'cancelled');
-  const rotated = await f.admin('clients.rotate', { id: created.id }) as { token: string };
-  await assert.rejects(f.agent(created.token, 'capabilities'), { code: 'permission_denied' });
-  assert.equal((await f.agent(rotated.token, 'capabilities') as { version: string }).version, 'test-version');
+  const created = await pairClient(f);
+  const described = await f.agent(created.token, 'auth.describe', {}) as { name: string; grants: unknown[]; expiresAt: number; lastUsedAt: number | null; agentName: string | null; verifiedAt: number | null };
+  assert.equal(described.name, 'Test agent');
+  assert.equal(described.grants.length, 1);
+  assert.ok(described.expiresAt > Date.now());
+  assert.equal(typeof described.lastUsedAt, 'number');
+  assert.equal(described.agentName, null);
+  assert.equal(described.verifiedAt, null);
+  assert.ok(!JSON.stringify(described).includes(created.token));
   const diagnostics = await f.admin('diagnostics.summary') as { version: string; nativeProtocolVersion: number; storage: unknown };
   assert.equal(diagnostics.version, 'test-version');
   assert.equal(diagnostics.nativeProtocolVersion, 1);
   assert.ok(!JSON.stringify(diagnostics).includes('PRIVATE'));
 });
 
-test('management can reject a prepared operation without attempting a native write', async (t) => {
+test('agents can verify themselves and management sees the binding immediately', async (t) => {
   const f = await fixture();
   t.after(() => closeFixture(f));
-  const { token } = await pairClient(f, 'required');
-  const plan = await f.agent(token, 'operations.prepare', { idempotencyKey: 'reject-plan', change: { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE' } }) as { id: string };
-  const preview = await f.admin('operations.preview', { id: plan.id }) as { id: string; provider: string; state: string; expiresAt: number; change: { containerId: string; title: string } };
-  assert.equal(preview.id, plan.id); assert.equal(preview.provider, 'reminders'); assert.equal(preview.state, 'prepared'); assert.ok(preview.expiresAt > Date.now());
-  assert.deepEqual(preview.change, { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE', body: '' });
-  assert.deepEqual(await f.admin('operations.reject', { id: plan.id }), { rejected: plan.id });
-  const rows = await f.admin('operations.list') as Array<{ id: string; state: string }>;
-  assert.equal(rows.find((row) => row.id === plan.id)?.state, 'cancelled');
-  await assert.rejects(f.admin('operations.reject', { id: plan.id }), { code: 'conflict' });
-  await assert.rejects(f.admin('operations.preview', { id: plan.id }), { code: 'conflict' });
+  const { id, token } = await pairClient(f);
+  const verified = await f.agent(token, 'auth.verify', { agent: '  Claude Code  ' }) as { name: string; agentName: string; verifiedAt: number; expiresAt: number };
+  assert.equal(verified.name, 'Test agent');
+  assert.equal(verified.agentName, 'Claude Code');
+  assert.ok(verified.verifiedAt > 0);
+  assert.ok(verified.expiresAt > Date.now());
+  const described = await f.agent(token, 'auth.describe', {}) as { agentName: string | null; verifiedAt: number | null };
+  assert.equal(described.agentName, 'Claude Code');
+  assert.equal(described.verifiedAt, verified.verifiedAt);
+  const listed = await f.admin('clients.list') as Array<{ id: string; agentName: string | null; verifiedAt: number | null }>;
+  assert.equal(listed.find((client) => client.id === id)?.agentName, 'Claude Code');
+  assert.equal(listed.find((client) => client.id === id)?.verifiedAt, verified.verifiedAt);
+  const audit = await f.admin('audit.list') as Array<{ action: string; clientId?: string }>;
+  assert.ok(audit.some((event) => event.action === 'agent_verified' && event.clientId === id));
+  await assert.rejects(f.agent(token, 'auth.verify', {}), { code: 'invalid_request' });
+  await assert.rejects(f.agent(token, 'auth.verify', { agent: '' }), { code: 'invalid_request' });
+  await assert.rejects(f.agent('wrong-token', 'auth.verify', { agent: 'Agent' }), { code: 'permission_denied' });
+  await assert.rejects(f.admin('auth.verify', { agent: 'Admin' }), { code: 'permission_denied' });
 });
 
 test('management diagnostics expose only fixed journaled actions', async (t) => {
@@ -211,15 +220,13 @@ test('management diagnostics expose only fixed journaled actions', async (t) => 
   await assert.rejects(f.admin('diagnostics.reminders_m1.start', { containerId: '' }), { code: 'invalid_request' });
 });
 
-test('prepare → approve → commit → get; audit captured; staged content never leaves the service', async (t) => {
+test('prepare → commit → get; audit captured; staged content never leaves the service', async (t) => {
   const f = await fixture();
   t.after(() => closeFixture(f));
-  const { token } = await pairClient(f, 'required');
+  const { token } = await pairClient(f);
   const change = { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE TITLE', body: 'PRIVATE BODY' };
   const plan = await f.agent(token, 'operations.prepare', { idempotencyKey: 'key-1', change }) as { id: string; state: string };
-  assert.equal(plan.state, 'prepared');
-  await assert.rejects(f.agent(token, 'operations.commit', { id: plan.id }), { code: 'approval_required' });
-  await f.admin('operations.approve', { id: plan.id });
+  assert.equal(plan.state, 'approved');
   // The M0 gate writer refuses the native step during preflight, before any durable intent is written.
   // The plan stays approved and nothing reaches Apple; this is an honest refusal, not a success claim.
   await assert.rejects(f.agent(token, 'operations.commit', { id: plan.id }), { code: 'service_unavailable' });
@@ -230,7 +237,7 @@ test('prepare → approve → commit → get; audit captured; staged content nev
   assert.ok(!JSON.stringify(listings).includes('PRIVATE'));
   const audit = await f.admin('audit.list') as Array<{ action: string; outcome: string }>;
   assert.ok(!JSON.stringify(audit).includes('PRIVATE'));
-  assert.ok(audit.some((e) => e.action === 'approved' && e.outcome === 'allowed'));
+  assert.ok(!audit.some((e) => e.action === 'approved'));
 });
 
 test('stub writer completes the full write path with one mutation for concurrent commits', async (t) => {
@@ -255,14 +262,85 @@ test('stub writer completes the full write path with one mutation for concurrent
   assert.deepEqual(states[0], states[1]);
 });
 
-test('revocation cancels pending plans and blocks new access', async (t) => {
+test('deleting an authorization invalidates its token and removes its operations', async (t) => {
   const f = await fixture();
   t.after(() => closeFixture(f));
-  const { id, token } = await pairClient(f, 'required');
+  const { id, token } = await pairClient(f);
   const plan = await f.agent(token, 'operations.prepare', { idempotencyKey: 'key-3', change: { kind: 'reminders.create', containerId: 'test-list', title: 'x' } }) as { id: string };
-  await f.admin('clients.revoke', { id });
+  assert.deepEqual(await f.admin('clients.delete', { id }), { id });
   await assert.rejects(f.agent(token, 'operations.commit', { id: plan.id }), { code: 'permission_denied' });
   await assert.rejects(f.agent(token, 'operations.prepare', { idempotencyKey: 'key-4', change: { kind: 'reminders.create', containerId: 'test-list', title: 'y' } }), { code: 'permission_denied' });
-  const rows = await f.admin('operations.list') as Array<{ id: string; state: string }>;
-  assert.equal(rows.find((r) => r.id === plan.id)?.state, 'cancelled');
+  const rows = await f.admin('operations.list') as Array<{ id: string }>;
+  assert.equal(rows.some((row) => row.id === plan.id), false);
+});
+
+test('management records last use and deletes active authorizations', async (t) => {
+  const f = await fixture();
+  t.after(() => closeFixture(f));
+  const { id, token } = await pairClient(f);
+  await f.agent(token, 'capabilities');
+  const listed = await f.admin('clients.list') as Array<{ id: string; lastUsedAt: number | null }>;
+  assert.equal(listed.find((client) => client.id === id)?.lastUsedAt !== null, true);
+  await assert.rejects(f.agent(token, 'clients.delete', { id }), { code: 'permission_denied' });
+  assert.deepEqual(await f.admin('clients.delete', { id }), { id });
+  await assert.rejects(f.agent(token, 'auth.verify', { agent: 'Deleted' }), { code: 'permission_denied' });
+  assert.deepEqual(await f.admin('clients.list'), []);
+  const audit = await f.admin('audit.list') as Array<{ action: string; clientId?: string }>;
+  assert.ok(audit.some((event) => event.action === 'client_deleted' && event.clientId === id));
+});
+
+test('agent container reads are audited with the target and never leak colors', async (t) => {
+  const calendarReader: CalendarReader = {
+    listCalendars: async () => [{ id: 'work', name: 'Work' }],
+    listEvents: async (calendarId) => ({
+      items: [{ id: 'event-1', calendarId, title: 'Planning', start: '2028-02-29T09:00:00+08:00', end: '2028-02-29T10:00:00+08:00', allDay: false, location: '', notes: '' }],
+      nextOffset: null,
+    }),
+  };
+  const f = await fixture({ calendarReader });
+  t.after(() => closeFixture(f));
+  const created = await f.admin('clients.create', {
+    name: 'Reader Agent',
+    grants: [{ provider: 'calendar', containerIds: ['work'], actions: ['read'], expiresAt: Date.now() + 3_600_000 }],
+  }) as { token: string; client: { id: string } };
+  const calendars = await f.agent(created.token, 'calendar.list_calendars') as Array<Record<string, unknown>>;
+  assert.deepEqual(calendars, [{ id: 'work', name: 'Work' }]);
+  await f.agent(created.token, 'calendar.list_events', { calendarId: 'work', from: '2028-02-29T00:00:00+08:00', to: '2028-03-01T00:00:00+08:00' });
+  const audit = await f.admin('audit.list') as Array<{ action: string; provider?: string; target?: string; outcome: string; count: number; clientId?: string; clientName?: string }>;
+  const read = audit.find((event) => event.action === 'read' && event.clientId === created.client.id);
+  assert.equal(read?.provider, 'calendar');
+  assert.equal(read?.target, 'work');
+  assert.equal(read?.outcome, 'allowed');
+  assert.equal(read?.count, 1);
+  assert.equal(read?.clientName, 'Reader Agent');
+});
+
+test('management can delete one audit lane without touching authorizations or other history', async (t) => {
+  const f = await fixture();
+  t.after(() => closeFixture(f));
+  const first = await f.admin('clients.create', { name: 'First', grants: [] }) as { client: { id: string } };
+  const second = await f.admin('clients.create', { name: 'Second', grants: [] }) as { client: { id: string } };
+  const { token } = await pairClient(f);
+  f.store.audit({ at: 10, clientId: first.client.id, provider: 'calendar', action: 'create', outcome: 'succeeded', count: 1, target: 'work' });
+  f.store.audit({ at: 11, clientId: second.client.id, provider: 'reminders', action: 'delete', outcome: 'succeeded', count: 1, target: 'inbox' });
+  f.store.audit({ at: 12, source: 'web', provider: 'calendar', action: 'read', outcome: 'succeeded', count: 1, target: 'work' });
+  const deleted = await f.admin('audit.delete_lane', { kind: 'client', clientId: first.client.id }) as { deleted: number };
+  assert.ok(deleted.deleted >= 1);
+  const remaining = await f.admin('audit.list') as Array<{ clientId?: string; source?: string }>;
+  assert.equal(remaining.some((event) => event.clientId === first.client.id), false);
+  assert.ok(remaining.some((event) => event.clientId === second.client.id));
+  assert.deepEqual(await f.admin('audit.delete_lane', { kind: 'web' }), { deleted: 1 });
+  assert.equal((await f.admin('clients.list') as unknown[]).length, 3);
+  await assert.rejects(f.admin('audit.delete_lane', { kind: 'client' }), { code: 'invalid_request' });
+  await assert.rejects(f.agent(token, 'audit.delete_lane', { kind: 'web' }), { code: 'permission_denied' });
+});
+
+test('deleting an authorization keeps its name in audit history', async (t) => {
+  const f = await fixture();
+  t.after(() => closeFixture(f));
+  const created = await f.admin('clients.create', { name: 'Deleted Agent', grants: [] }) as { client: { id: string } };
+  await f.admin('clients.delete', { id: created.client.id });
+  const audit = await f.admin('audit.list') as Array<{ action: string; clientId?: string; clientName?: string }>;
+  assert.equal(audit.find((event) => event.action === 'client_created' && event.clientId === created.client.id)?.clientName, 'Deleted Agent');
+  assert.equal(audit.find((event) => event.action === 'client_deleted' && event.clientId === created.client.id)?.clientName, 'Deleted Agent');
 });

@@ -14,11 +14,13 @@ test('Skill turns reminder intent into a real Apple Reminders mutation', () => {
   assert.match(skill, /Never merely promise to remind the user/);
 });
 
-test('Skill documents credential, JSON, privacy, and replacement-safe command contracts', () => {
+test('Skill documents authorization IDs, JSON, privacy, and replacement-safe command contracts', () => {
   assert.match(skill, /Every machine call must use `--json`/);
-  assert.match(skill, /every business command and `operation get`[^\n]+`--credential-file <path>`/);
+  assert.match(skill, /`--auth-key <key>`/);
+  assert.match(skill, /`--auth-file <path>`/);
+  assert.match(skill, /`APPLE_CONNECTOR_AUTH`/);
   assert.match(skill, /mode `0600`/);
-  assert.match(skill, /full replacements/);
+  assert.match(skill, /full replacement/);
   assert.match(skill, /preserve every unchanged field/);
   assert.match(skill, /`nextOffset`/);
 });
@@ -29,11 +31,30 @@ test('Skill due examples match the strict reminder schema', () => {
   assert.match(skill, /date-only[^\n]+must not include `timeZone`/);
 });
 
-test('Skill covers onboarding and durable write states without false success', () => {
-  for (const state of ['pending', 'configured', 'expired', 'failed', 'prepared', 'succeeded', 'outcome_unknown']) {
+test('Skill covers the Agent prompt flow and durable write states without false success', () => {
+  assert.match(skill, /apple-connector init/);
+  assert.match(skill, /Credential file/);
+  assert.match(skill, /apple-connector auth show/);
+  assert.match(skill, /apple-connector auth verify --agent/);
+  assert.match(skill, /open --section <setup\|audit>/);
+  assert.match(skill, /apple-connector open --section docs/);
+  assert.doesNotMatch(skill, /agent init-status/);
+  for (const state of ['expired', 'failed', 'succeeded', 'outcome_unknown', 'cancelled']) {
     assert.ok(skill.includes(`\`${state}\``), `Skill must cover ${state}.`);
   }
   assert.match(skill, /same payload and idempotency key/);
   assert.match(skill, /Do not report success unless the state is `succeeded`/);
-  assert.match(skill, /operation get[^\n]+--credential-file/);
+  assert.match(skill, /operation get[^\n]+--auth-key/);
+  assert.match(skill, /profile directory/);
+});
+
+test('Skill documents partial reminder patching, due kinds, and the ID boundary', () => {
+  assert.match(skill, /reminder patch --list-id[^\n]+--clear-due/);
+  assert.match(skill, /`due: null` clears/);
+  assert.match(skill, /`completed: false` reopens/);
+  assert.match(skill, /\{"kind":"floating"/);
+  assert.match(skill, /`recurring: true`/);
+  assert.match(skill, /full sync, account reset, or data-store rebuild/);
+  assert.doesNotMatch(skill, /reminder patch[^\n]+--title/);
+  assert.doesNotMatch(skill, /reminder patch[^\n]+--body/);
 });

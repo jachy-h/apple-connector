@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Store } from '../src/storage/database.js';
-import { authorize, projectCalendarEvent } from '../src/policy/authorize.js';
-import { ReminderOperations } from '../src/operations/reminders.js';
+import { authorize } from '../src/policy/authorize.js';
+import { AgentOperations } from '../src/operations/agent.js';
 import { createReminderSchema } from '../src/providers/reminders/types.js';
 import type { ReminderWriter } from '../src/providers/reminders/types.js';
 
-function fixture(approval: 'automatic' | 'required' = 'automatic') {
+function fixture() {
   const store = new Store(':memory:');
   let clock = Date.now();
   const { client, token } = store.createClient({ name: 'Test client', grants: [{
-    provider: 'reminders', containerIds: ['test-list'], actions: ['create'], fields: 'full', approval,
+    provider: 'reminders', containerIds: ['test-list'], actions: ['create'],
     expiresAt: clock + 3600_000,
   }] });
   let writes = 0;
@@ -19,19 +19,18 @@ function fixture(approval: 'automatic' | 'required' = 'automatic') {
     create: async (change) => { writes++; return { id: `test-${writes}`, containerId: change.containerId }; },
     verify: async () => true,
   };
-  const operations = new ReminderOperations(store, writer, () => clock);
+  const operations = new AgentOperations(store, writer, undefined, undefined, undefined, () => clock);
   const request = { idempotencyKey: 'key', change: { kind: 'reminders.create', containerId: 'test-list', title: 'PRIVATE TITLE', body: 'PRIVATE BODY' } };
   return { store, token, client, writer, operations, request, writes: () => writes, advance: (ms: number) => { clock += ms; } };
 }
 
-test('default deny, expired scopes, unknown input and busy-field projection', () => {
+test('default deny, expired scopes and unknown input', async () => {
   const f = fixture();
   try {
     assert.throws(() => authorize(f.client, 'notes', 'test-list', 'read'), { code: 'permission_denied' });
     assert.throws(() => authorize(f.client, 'reminders', 'other-list', 'create'), { code: 'permission_denied' });
     assert.throws(() => authorize(f.client, 'reminders', 'test-list', 'create', Date.now() + 7200_000), { code: 'permission_denied' });
-    assert.throws(() => f.operations.prepare(f.token, { ...f.request, user_approved: true }));
-    assert.deepEqual(projectCalendarEvent({ id: 'private-id', title: 'secret', url: 'secret', start: 'a', end: 'b', allDay: false, futurePrivateField: 'secret' }, 'busy'), { start: 'a', end: 'b', allDay: false });
+    await assert.rejects(f.operations.prepare(f.token, { ...f.request, user_approved: true }));
   } finally { f.store.close(); }
 });
 
@@ -49,8 +48,8 @@ test('all-container scope authorizes any container for its provider', () => {
 test('one mutation for concurrent retries and no content retained after success', async () => {
   const f = fixture();
   try {
-    const plan = f.operations.prepare(f.token, f.request);
-    assert.deepEqual(f.operations.prepare(f.token, f.request), plan);
+    const plan = await f.operations.prepare(f.token, f.request);
+    assert.deepEqual(await f.operations.prepare(f.token, f.request), plan);
     const results = await Promise.all([f.operations.commit(f.token, plan.id), f.operations.commit(f.token, plan.id)]);
     assert.equal(f.writes(), 1);
     assert.equal(results[0]?.state, 'succeeded');
@@ -58,34 +57,31 @@ test('one mutation for concurrent retries and no content retained after success'
     const rows = f.store.db.prepare('SELECT * FROM operations').all();
     assert.ok(!JSON.stringify(rows).includes('PRIVATE'));
     assert.ok(!JSON.stringify(f.store.auditEvents()).includes('PRIVATE'));
-    assert.throws(() => f.operations.prepare(f.token, { ...f.request, change: { ...f.request.change, title: 'different' } }), { code: 'conflict' });
+    await assert.rejects(f.operations.prepare(f.token, { ...f.request, change: { ...f.request.change, title: 'different' } }), { code: 'conflict' });
   } finally { f.store.close(); }
 });
 
-test('approval, ownership and expiration enforced before execution', async () => {
-  const f = fixture('required');
+test('ownership and expiration enforced before execution', async () => {
+  const f = fixture();
   try {
-    const plan = f.operations.prepare(f.token, f.request);
-    await assert.rejects(f.operations.commit(f.token, plan.id), { code: 'approval_required' });
+    const plan = await f.operations.prepare(f.token, f.request);
     const other = f.store.createClient({ name: 'Other', grants: [] });
     assert.throws(() => f.operations.get(other.token, plan.id), { code: 'permission_denied' });
     await assert.rejects(f.operations.commit(other.token, plan.id), { code: 'permission_denied' });
-    f.operations.approve(plan.id);
     f.advance(16 * 60_000);
     await assert.rejects(f.operations.commit(f.token, plan.id), { code: 'conflict' });
     assert.equal(f.writes(), 0);
   } finally { f.store.close(); }
 });
 
-test('revocation during native preflight prevents mutation', async () => {
+test('deletion during native preflight prevents mutation', async () => {
   const f = fixture();
   try {
-    f.writer.preflight = async () => { f.store.revoke(f.client.id); };
-    const plan = f.operations.prepare(f.token, f.request);
+    f.writer.preflight = async () => { f.store.deleteClient(f.client.id); };
+    const plan = await f.operations.prepare(f.token, f.request);
     await assert.rejects(f.operations.commit(f.token, plan.id), { code: 'permission_denied' });
     assert.equal(f.writes(), 0);
     assert.throws(() => f.store.authenticate(f.token), { code: 'permission_denied' });
-    assert.equal(f.store.db.prepare('SELECT payload FROM operations WHERE id=?').get(plan.id)?.payload, null);
   } finally { f.store.close(); }
 });
 
@@ -94,7 +90,7 @@ test('unknown native result is never automatically replayed', async () => {
   try {
     let attempts = 0;
     f.writer.create = async () => { attempts++; throw new Error('Native timeout containing SECRET'); };
-    const plan = f.operations.prepare(f.token, f.request);
+    const plan = await f.operations.prepare(f.token, f.request);
     await assert.rejects(f.operations.commit(f.token, plan.id), { code: 'outcome_unknown' });
     assert.equal((await f.operations.commit(f.token, plan.id)).state, 'outcome_unknown');
     assert.equal(attempts, 1);
@@ -105,9 +101,9 @@ test('unknown native result is never automatically replayed', async () => {
 test('crash recovery and audit pruning preserve idempotency', async () => {
   const f = fixture();
   try {
-    const plan = f.operations.prepare(f.token, f.request);
+    const plan = await f.operations.prepare(f.token, f.request);
     f.store.db.prepare("UPDATE operations SET state='executing' WHERE id=?").run(plan.id);
-    const recovered = new ReminderOperations(f.store, f.writer);
+    const recovered = new AgentOperations(f.store, f.writer);
     f.store.pruneAudit(Date.now(), { days: 1, maxRows: 1, maxBytes: 1 });
     assert.equal(f.store.auditEvents().length, 0);
     assert.equal((await recovered.commit(f.token, plan.id)).state, 'outcome_unknown');
@@ -118,7 +114,7 @@ test('crash recovery and audit pruning preserve idempotency', async () => {
 test('failed audit intent prevents native write', async () => {
   const f = fixture();
   try {
-    const plan = f.operations.prepare(f.token, f.request);
+    const plan = await f.operations.prepare(f.token, f.request);
     f.store.db.exec(`CREATE TRIGGER fail_audit BEFORE INSERT ON audit BEGIN SELECT RAISE(ABORT, 'disk failure'); END;`);
     await assert.rejects(f.operations.commit(f.token, plan.id));
     assert.equal(f.writes(), 0);

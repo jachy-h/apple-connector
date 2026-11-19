@@ -8,14 +8,14 @@ import { EventKitReminderProvider } from '../../providers/reminders/eventkit.js'
 import { EventKitCalendarReader } from '../../providers/calendar/eventkit.js';
 import { ServiceFacade } from './handlers.js';
 import { LocalServer } from './service.js';
-import { acquireServiceLock, readAdminToken, releaseServiceLock, statePaths } from './paths.js';
+import { acquireServiceLock, migrateLegacyStateSync, readAdminToken, releaseServiceLock, statePaths } from './paths.js';
 import { appendServiceLog } from './logging.js';
 import { JxaRunner } from '../../jxa/runner.js';
 import { EventKitHelperClient } from '../../native/helper-client.js';
 import { WebWrites } from '../../application/web-writes.js';
 import { listDiagnosticJournals, loadDiagnosticJournal, recoverJournaledReminderM1Diagnostic, runJournaledReminderM1Diagnostic } from '../../application/diagnostic-journal.js';
 
-const paths = statePaths();
+const paths = (() => { migrateLegacyStateSync(); return statePaths(); })();
 const adminToken = readAdminToken(paths);
 
 let store: Store;
@@ -30,7 +30,7 @@ try {
 }
 // Native creation was validated only for the narrow adapters below. Calendar writes and existing
 // reminder mutations remain gated until their independent support checks are complete.
-const eventKitHelper = new EventKitHelperClient();
+const eventKitHelper = new EventKitHelperClient({ socketPath: process.env.APPLE_CONNECTOR_HELPER_SOCKET ?? paths.helperSocket });
 const reminderWriter = new EventKitReminderProvider(eventKitHelper);
 const calendarProvider = new EventKitCalendarReader(eventKitHelper);
 const operations = new AgentOperations(store, reminderWriter, calendarProvider, reminderWriter, calendarProvider);

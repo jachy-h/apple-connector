@@ -1,5 +1,5 @@
 export type ErrorCode =
-  | 'invalid_request' | 'permission_denied' | 'approval_required'
+  | 'invalid_request' | 'permission_denied'
   | 'ambiguous_target' | 'conflict' | 'unsupported_operation'
   | 'timeout' | 'outcome_unknown' | 'service_unavailable' | 'protocol_error';
 

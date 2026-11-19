@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { AdminWebServer } from '../src/transports/admin/server.js';
 import { appVersion } from '../src/application/version.js';
-import { ReminderOperations } from '../src/operations/reminders.js';
+import { AgentOperations } from '../src/operations/agent.js';
 import { Store } from '../src/storage/database.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
 import { m0GateWriter } from '../src/transports/local/service.js';
@@ -26,7 +26,7 @@ function call(origin: URL, path: string, options: { method?: string; headers?: R
 test('management site exchanges a one-time loopback link for a CSRF-protected admin session', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'apple-connector-admin-'));
   const store = new Store(':memory:');
-  const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter), 'admin-token', appVersion);
+  const facade = new ServiceFacade(store, new AgentOperations(store, m0GateWriter), 'admin-token', appVersion);
   const server = new AdminWebServer({ facade, staticRoot: root });
   writeFileSync(join(root, 'index.html'), '<!doctype html><title>Apple Connector</title>');
   t.after(async () => { await server.close(); store.close(); rmSync(root, { recursive: true, force: true }); });
@@ -44,7 +44,9 @@ test('management site exchanges a one-time loopback link for a CSRF-protected ad
 
   const sessionInfo = await call(link, '/api/bootstrap', { headers: { cookie: session } });
   assert.equal(sessionInfo.status, 200);
-  const csrf = (JSON.parse(sessionInfo.body) as { csrf: string }).csrf;
+  const bootstrapBody = JSON.parse(sessionInfo.body) as { csrf: string; onboardingId?: string };
+  assert.equal(bootstrapBody.onboardingId, undefined);
+  const csrf = bootstrapBody.csrf;
   const rpc = (method: string, token = csrf) => call(link, '/api/rpc', {
     method: 'POST', headers: { cookie: session, origin: link.origin, 'content-type': 'application/json', 'x-csrf-token': token }, body: JSON.stringify({ method, params: {} }),
   });
@@ -60,7 +62,7 @@ test('management site exchanges a one-time loopback link for a CSRF-protected ad
 test('management site can reissue a login link without invalidating an established session', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'apple-connector-admin-'));
   const store = new Store(':memory:');
-  const facade = new ServiceFacade(store, new ReminderOperations(store, m0GateWriter), 'admin-token', appVersion);
+  const facade = new ServiceFacade(store, new AgentOperations(store, m0GateWriter), 'admin-token', appVersion);
   const server = new AdminWebServer({ facade, staticRoot: root });
   writeFileSync(join(root, 'index.html'), '<!doctype html><title>Apple Connector</title>');
   t.after(async () => { await server.close(); store.close(); rmSync(root, { recursive: true, force: true }); });

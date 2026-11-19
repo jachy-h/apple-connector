@@ -4,7 +4,7 @@ import { ConnectorError } from '../application/errors.js';
 import { authorize } from '../policy/authorize.js';
 import type { Action, Client, Grant } from '../policy/schema.js';
 import { Store, digest } from '../storage/database.js';
-import { completeReminderSchema, createReminderSchema, deleteReminderSchema, reminderReceiptSchema, updateReminderSchema } from '../providers/reminders/types.js';
+import { completeReminderSchema, createReminderSchema, deleteReminderSchema, patchReminderSchema, reminderReceiptSchema, updateReminderSchema } from '../providers/reminders/types.js';
 import type { ReminderWriter } from '../providers/reminders/types.js';
 import type { AgentReminderMutator, ReminderReader } from '../providers/reminders/eventkit.js';
 import { calendarEventReceiptSchema, createCalendarEventSchema, deleteCalendarEventSchema, updateCalendarEventSchema } from '../providers/calendar/types.js';
@@ -13,7 +13,7 @@ import type { CalendarReader } from '../providers/calendar/eventkit.js';
 
 export const agentChangeSchema = z.union([
   createCalendarEventSchema, updateCalendarEventSchema, deleteCalendarEventSchema,
-  createReminderSchema, updateReminderSchema, completeReminderSchema, deleteReminderSchema,
+  createReminderSchema, updateReminderSchema, patchReminderSchema, completeReminderSchema, deleteReminderSchema,
 ]);
 export type AgentChange = z.infer<typeof agentChangeSchema>;
 
@@ -25,8 +25,9 @@ type OperationRow = {
 const prepareSchema = z.object({ idempotencyKey: z.string().min(1).max(128), change: agentChangeSchema }).strict();
 
 function changeAccess(change: AgentChange): { provider: Provider; action: Action } {
-  const [provider, verb] = change.kind.split('.') as [Provider, 'create' | 'update' | 'complete' | 'delete'];
-  return { provider, action: verb };
+  const [provider, verb] = change.kind.split('.') as [Provider, 'create' | 'update' | 'patch' | 'complete' | 'delete'];
+  // Patch is a bounded update: it uses the existing update grant rather than a new action.
+  return { provider, action: verb === 'patch' ? 'update' : verb };
 }
 
 /** Durable agent mutation service shared by all Calendar and Reminders CLI write commands. */
@@ -73,7 +74,7 @@ export class AgentOperations {
     try { grant = await this.grant(client, provider, change.containerId, action); }
     catch (error) {
       const errorCode = error instanceof ConnectorError ? error.code : 'service_unavailable';
-      this.store.audit({ at: this.now(), clientId: client.id, provider, action, outcome: 'denied', count: 0, errorCode });
+      this.store.audit({ at: this.now(), clientId: client.id, provider, action, target: change.containerId, outcome: 'denied', count: 0, errorCode });
       throw error;
     }
     const hash = digest(JSON.stringify(change));
@@ -85,7 +86,7 @@ export class AgentOperations {
     }
     this.store.assertOperationCapacity(Buffer.byteLength(JSON.stringify(change)));
     const id = randomUUID();
-    const state = grant.approval === 'required' ? 'prepared' : 'approved';
+    const state = 'approved';
     this.store.db.prepare(`INSERT INTO operations
       (id,client_id,provider,key_hash,request_hash,policy_version,state,payload,expires_at,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id, client.id, provider, digest(idempotencyKey), hash, client.policyVersion,
@@ -96,16 +97,6 @@ export class AgentOperations {
   async submit(token: string, raw: unknown) {
     const plan = await this.prepare(token, raw);
     return plan.state === 'approved' ? this.commit(token, plan.id) : plan;
-  }
-
-  approve(id: string): void {
-    const row = this.row(id);
-    this.validateMetadata(row);
-    if (row.state !== 'prepared') throw new ConnectorError('conflict', 'Plan is not awaiting approval.');
-    this.store.transaction(() => {
-      this.store.db.prepare("UPDATE operations SET state='approved' WHERE id=?").run(id);
-      this.store.audit({ at: this.now(), clientId: row.client_id, operationId: id, action: 'approved', outcome: 'allowed', count: 1 });
-    });
   }
 
   commit(token: string, id: string): Promise<ReturnType<AgentOperations['get']>> {
@@ -148,14 +139,20 @@ export class AgentOperations {
     return change;
   }
 
+  private async preflight(change: AgentChange): Promise<void> {
+    if (change.kind === 'reminders.create') await this.reminders.preflight(change);
+  }
+
   private async mutate(change: AgentChange): Promise<{ id: string; containerId: string }> {
     switch (change.kind) {
       case 'reminders.create':
-        await this.reminders.preflight(change);
         return reminderReceiptSchema.parse(await this.reminders.create(change));
       case 'reminders.update':
         if (!this.reminders.update) throw new ConnectorError('service_unavailable', 'Reminder editing is not configured.');
         return reminderReceiptSchema.parse(await this.reminders.update(change));
+      case 'reminders.patch':
+        if (!this.reminders.patch) throw new ConnectorError('service_unavailable', 'Reminder patching is not configured.');
+        return reminderReceiptSchema.parse(await this.reminders.patch(change));
       case 'reminders.complete':
         if (!this.reminders.complete) throw new ConnectorError('service_unavailable', 'Reminder completion is not configured.');
         return reminderReceiptSchema.parse(await this.reminders.complete(change));
@@ -180,14 +177,20 @@ export class AgentOperations {
     if (row.client_id !== client.id) throw new ConnectorError('permission_denied', 'Plan belongs to another client.');
     if (['succeeded', 'outcome_unknown', 'failed', 'cancelled', 'expired'].includes(row.state)) return this.result(row);
     let change = await this.validate(row);
-    if (row.state !== 'approved') throw new ConnectorError('approval_required', 'Approve this plan in the management interface.');
     row = this.row(id);
     change = await this.validate(row);
-    if (row.state !== 'approved') throw new ConnectorError('conflict', 'Plan is no longer approved.');
+    if (row.state !== 'approved') throw new ConnectorError('conflict', 'Plan is no longer executable.');
+    // Preflight is read-only and runs before durable intent. A user can delete the
+    // authorization while it is in flight, so validate again before marking executing.
+    await this.preflight(change);
+    row = this.row(id);
+    change = await this.validate(row);
+    if (row.state !== 'approved') throw new ConnectorError('conflict', 'Plan is no longer executable.');
     const { provider, action } = changeAccess(change);
     this.store.transaction(() => {
-      this.store.db.prepare("UPDATE operations SET state='executing' WHERE id=?").run(id);
-      this.store.audit({ at: this.now(), clientId: client.id, operationId: id, provider, action, outcome: 'allowed', count: 1, policyVersion: row.policy_version });
+      const updated = this.store.db.prepare("UPDATE operations SET state='executing' WHERE id=? AND state='approved'").run(id);
+      if (updated.changes !== 1) throw new ConnectorError('permission_denied', 'Plan is no longer executable.');
+      this.store.audit({ at: this.now(), clientId: client.id, operationId: id, provider, action, target: change.containerId, outcome: 'allowed', count: 1, policyVersion: row.policy_version });
     });
     try {
       const receipt = await this.mutate(change);
@@ -199,14 +202,14 @@ export class AgentOperations {
       }
       this.store.transaction(() => {
         this.store.db.prepare("UPDATE operations SET state='succeeded',payload=NULL,result=? WHERE id=?").run(JSON.stringify(receipt), id);
-        this.store.audit({ at: this.now(), clientId: client.id, operationId: id, provider, action, outcome: 'succeeded', count: 1 });
+        this.store.audit({ at: this.now(), clientId: client.id, operationId: id, provider, action, target: change.containerId, outcome: 'succeeded', count: 1 });
       });
     } catch (error) {
       const safelyFailed = error instanceof ConnectorError && ['invalid_request', 'permission_denied', 'unsupported_operation'].includes(error.code);
       try {
         this.store.transaction(() => {
           this.store.db.prepare(`UPDATE operations SET state=?,payload=NULL WHERE id=?`).run(safelyFailed ? 'failed' : 'outcome_unknown', id);
-          this.store.audit({ at: this.now(), clientId: client.id, operationId: id, provider, action, outcome: safelyFailed ? 'failed' : 'outcome_unknown', count: safelyFailed ? 0 : 1, errorCode: safelyFailed ? error.code : 'outcome_unknown' });
+          this.store.audit({ at: this.now(), clientId: client.id, operationId: id, provider, action, target: change.containerId, outcome: safelyFailed ? 'failed' : 'outcome_unknown', count: safelyFailed ? 0 : 1, errorCode: safelyFailed ? error.code : 'outcome_unknown' });
         });
       } catch { /* Persisted executing intent is recovered as unknown on restart. */ }
       if (safelyFailed) throw error;

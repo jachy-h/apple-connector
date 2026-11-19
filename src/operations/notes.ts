@@ -38,21 +38,12 @@ export class NoteOperations {
     }
     this.store.assertOperationCapacity(Buffer.byteLength(JSON.stringify(change)));
     const id = randomUUID();
-    const state = grant.approval === 'required' ? 'prepared' : 'approved';
+    const state = 'approved';
     this.store.db.prepare(`INSERT INTO operations
       (id,client_id,provider,key_hash,request_hash,policy_version,state,payload,expires_at,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id, client.id, 'notes', digest(idempotencyKey), hash, client.policyVersion,
         state, JSON.stringify(change), Math.min(this.now() + 15 * 60_000, grant.expiresAt), this.now());
     return this.get(token, id);
-  }
-
-  approve(id: string): void {
-    const row = this.row(id); this.validate(row);
-    if (row.state !== 'prepared') throw new ConnectorError('conflict', 'Plan is not awaiting approval.');
-    this.store.transaction(() => {
-      this.store.db.prepare("UPDATE operations SET state='approved' WHERE id=?").run(id);
-      this.store.audit({ at: this.now(), clientId: row.client_id, operationId: id, action: 'approved', outcome: 'allowed', count: 1 });
-    });
   }
 
   commit(token: string, id: string): Promise<ReturnType<NoteOperations['get']>> {
@@ -83,9 +74,8 @@ export class NoteOperations {
     if (row.client_id !== client.id) throw new ConnectorError('permission_denied', 'Plan belongs to another client.');
     if (['succeeded', 'outcome_unknown', 'failed', 'cancelled', 'expired'].includes(row.state)) return this.result(row);
     const change = this.validate(row);
-    if (row.state !== 'approved') throw new ConnectorError('approval_required', 'Approve this plan in the management interface.');
     await this.writer.preflight(change); row = this.row(id); this.validate(row);
-    if (row.state !== 'approved') throw new ConnectorError('conflict', 'Plan is no longer approved.');
+    if (row.state !== 'approved') throw new ConnectorError('conflict', 'Plan is no longer executable.');
     this.store.transaction(() => {
       this.store.db.prepare("UPDATE operations SET state='executing' WHERE id=?").run(id);
       this.store.audit({ at: this.now(), clientId: client.id, operationId: id, provider: 'notes', action: 'create', outcome: 'allowed', count: 1, policyVersion: row.policy_version });

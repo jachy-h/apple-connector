@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/storage/database.js';
-import { ReminderOperations } from '../src/operations/reminders.js';
+import { AgentOperations } from '../src/operations/agent.js';
 import { WebWrites } from '../src/application/web-writes.js';
 import { ServiceFacade } from '../src/transports/local/handlers.js';
 import { DatabaseSync } from 'node:sqlite';
@@ -22,40 +22,138 @@ test('disk database reopens with credentials and private filesystem permissions'
     const second = new Store(path);
     try {
       assert.equal(second.authenticate(token).id, client.id);
-      second.revoke(client.id);
+      second.deleteClient(client.id);
       assert.throws(() => second.authenticate(token), { code: 'permission_denied' });
     } finally { second.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('client policy edits cancel pending plans and credential rotation invalidates the old token', () => {
+test('v5 databases strip approval from grants and cancel unfinished operations', () => {
+  const root = mkdtempSync(join(tmpdir(), 'apple-connector-v5-'));
+  const path = join(root, 'connector.sqlite');
+  try {
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE clients (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+      grants TEXT NOT NULL, policy_version INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0,
+      last_used_at INTEGER);
+      CREATE TABLE operations (id TEXT PRIMARY KEY, client_id TEXT NOT NULL, provider TEXT NOT NULL,
+        key_hash TEXT NOT NULL, request_hash TEXT NOT NULL, policy_version INTEGER NOT NULL,
+        state TEXT NOT NULL, payload TEXT, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
+        result TEXT, UNIQUE(client_id, key_hash));
+      PRAGMA user_version=5;`);
+    legacy.prepare(`INSERT INTO clients(id,name,token_hash,grants) VALUES('client','Legacy','hash',?)`)
+      .run(JSON.stringify([{ provider: 'reminders', containerIds: ['one'], actions: ['read'], approval: 'required', expiresAt: Date.now() + 60_000 }]));
+    legacy.prepare(`INSERT INTO operations(id,client_id,provider,key_hash,request_hash,policy_version,state,payload,expires_at,created_at)
+      VALUES('waiting','client','reminders','k1','r1',1,'prepared','{}',1,1),('approved','client','reminders','k2','r2',1,'approved','{}',1,2)`).run();
+    legacy.close();
+    const store = new Store(path);
+    try {
+      const grant = store.client('client').grants[0] as Record<string, unknown>;
+      assert.equal('approval' in grant, false);
+      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
+      const states = store.db.prepare('SELECT id,state,payload FROM operations ORDER BY id').all() as Array<{ id: string; state: string; payload: string | null }>;
+      assert.deepEqual(states.map((row) => ({ ...row })), [{ id: 'approved', state: 'cancelled', payload: null }, { id: 'waiting', state: 'cancelled', payload: null }]);
+    } finally { store.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('client last-used timestamps update at most once per minute', () => {
   const store = new Store(':memory:');
   try {
-    const created = store.createClient({ name: 'Before', grants: [{ provider: 'reminders', containerIds: ['one'], actions: ['create'], expiresAt: Date.now() + 60_000 }] });
-    store.db.prepare(`INSERT INTO operations(id,client_id,provider,key_hash,request_hash,policy_version,state,payload,expires_at,created_at)
-      VALUES('pending',?,'reminders','key','request',1,'approved','{}',?,?)`).run(created.client.id, Date.now() + 60_000, Date.now());
-    const updated = store.updateClient(created.client.id, { name: 'After', grants: [{ provider: 'reminders', containerIds: ['two'], actions: ['read'], expiresAt: Date.now() + 60_000 }] });
-    assert.equal(updated.name, 'After');
-    assert.equal(updated.policyVersion, 2);
-    assert.equal(store.db.prepare("SELECT state FROM operations WHERE id='pending'").get()?.state, 'cancelled');
-    assert.equal(store.db.prepare("SELECT payload FROM operations WHERE id='pending'").get()?.payload, null);
-    const rotated = store.rotateClientToken(created.client.id);
-    assert.throws(() => store.authenticate(created.token), { code: 'permission_denied' });
-    assert.equal(store.authenticate(rotated.token).id, created.client.id);
-    assert.equal(rotated.client.policyVersion, 2);
+    const created = store.createClient({ name: 'Usage', grants: [] });
+    assert.equal(created.client.lastUsedAt, null);
+    assert.equal(store.authenticate(created.token, 10_000).lastUsedAt, 10_000);
+    assert.equal(store.authenticate(created.token, 40_000).lastUsedAt, 10_000);
+    assert.equal(store.authenticate(created.token, 70_001).lastUsedAt, 70_001);
+    assert.equal(store.listClients()[0]?.lastUsedAt, 70_001);
+    assert.equal(store.client(created.client.id).policyVersion, 1);
   } finally { store.close(); }
 });
 
-test('maintenance removes expired content but retains unknown outcomes', () => {
+test('Agent verification records the latest Agent name and timestamp', () => {
+  const store = new Store(':memory:');
+  try {
+    const created = store.createClient({ name: 'Bound', grants: [] });
+    assert.equal(created.client.agentName, null);
+    assert.equal(created.client.verifiedAt, null);
+    const first = store.verifyClient(created.client.id, 'Claude Code', 10_000);
+    assert.equal(first.agentName, 'Claude Code');
+    assert.equal(first.verifiedAt, 10_000);
+    const second = store.verifyClient(created.client.id, 'Codex', 20_000);
+    assert.equal(second.agentName, 'Codex');
+    assert.equal(second.verifiedAt, 20_000);
+    assert.equal(store.listClients()[0]?.agentName, 'Codex');
+    assert.equal(store.listClients()[0]?.verifiedAt, 20_000);
+    assert.throws(() => store.verifyClient('missing', 'Agent', 30_000), { code: 'permission_denied' });
+  } finally { store.close(); }
+});
+
+test('v7 databases gain nullable Agent binding columns', () => {
+  const root = mkdtempSync(join(tmpdir(), 'apple-connector-v7-'));
+  const path = join(root, 'connector.sqlite');
+  try {
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE clients (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+      grants TEXT NOT NULL, policy_version INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0,
+      last_used_at INTEGER);
+      PRAGMA user_version=7;`);
+    legacy.prepare(`INSERT INTO clients(id,name,token_hash,grants) VALUES('client','Legacy','hash','[]')`).run();
+    legacy.close();
+    const store = new Store(path);
+    try {
+      const client = store.client('client');
+      assert.equal(client.agentName, null);
+      assert.equal(client.verifiedAt, null);
+      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
+    } finally { store.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('active clients can be deleted with their operations while audit history remains', () => {
+  const store = new Store(':memory:');
+  try {
+    const created = store.createClient({ name: 'Delete me', grants: [] });
+    store.db.prepare(`INSERT INTO operations(id,client_id,provider,key_hash,request_hash,policy_version,state,expires_at,created_at)
+      VALUES('done',?,'reminders','k1','r1',1,'succeeded',10,1),('pending',?,'reminders','k2','r2',1,'executing',10,2)`)
+      .run(created.client.id, created.client.id);
+    assert.throws(() => store.deleteClient(created.client.id), { code: 'conflict' });
+    store.db.prepare("UPDATE operations SET state='outcome_unknown' WHERE id='pending'").run();
+    assert.deepEqual(store.deleteClient(created.client.id), { id: created.client.id });
+    assert.throws(() => store.client(created.client.id), { code: 'permission_denied' });
+    assert.equal((store.db.prepare('SELECT COUNT(*) AS count FROM operations').get() as { count: number }).count, 0);
+    assert.equal(store.listClients().length, 0);
+    assert.ok(store.auditEvents().some((event) => event.action === 'client_deleted' && event.clientId === created.client.id));
+  } finally { store.close(); }
+});
+
+test('v4 databases gain a nullable last-used timestamp', () => {
+  const root = mkdtempSync(join(tmpdir(), 'apple-connector-v4-'));
+  const path = join(root, 'connector.sqlite');
+  try {
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE clients (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+      grants TEXT NOT NULL, policy_version INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0);
+      PRAGMA user_version=4;`);
+    legacy.prepare(`INSERT INTO clients(id,name,token_hash,grants) VALUES('client','Legacy','hash','[]')`).run();
+    legacy.close();
+    const store = new Store(path);
+    try {
+      assert.equal(store.client('client').lastUsedAt, null);
+      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
+    } finally { store.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('maintenance removes expired content but retains unknown outcomes', async () => {
   const store = new Store(':memory:');
   const now = Date.now();
   try {
     const { token } = store.createClient({ name: 'Test', grants: [{ provider: 'reminders', containerIds: ['test'], actions: ['create'], expiresAt: now + 3600_000 }] });
-    const operations = new ReminderOperations(store, {
+    const operations = new AgentOperations(store, {
       preflight: async () => {}, create: async () => ({ id: 'test', containerId: 'test' }), verify: async () => true,
-    }, () => now);
-    const plan = operations.prepare(token, { idempotencyKey: 'test', change: { kind: 'reminders.create', containerId: 'test', title: 'SECRET' } });
-    const unknown = operations.prepare(token, { idempotencyKey: 'unknown', change: { kind: 'reminders.create', containerId: 'test', title: 'SECRET' } });
+    }, undefined, undefined, undefined, () => now);
+    const plan = await operations.prepare(token, { idempotencyKey: 'test', change: { kind: 'reminders.create', containerId: 'test', title: 'SECRET' } });
+    const unknown = await operations.prepare(token, { idempotencyKey: 'unknown', change: { kind: 'reminders.create', containerId: 'test', title: 'SECRET' } });
     store.db.prepare("UPDATE operations SET state='outcome_unknown',payload=NULL WHERE id=?").run(unknown.id);
     store.pruneOperations(now + 16 * 60_000);
     assert.equal(operations.get(token, plan.id).state, 'expired');
@@ -161,7 +259,7 @@ test('management routes reminder update and delete requests to Web writes', asyn
     remove: async (change: { id: string; containerId: string }) => { deletes++; return { id: change.id, containerId: change.containerId }; },
   };
   try {
-    const operations = new ReminderOperations(store, reminders);
+    const operations = new AgentOperations(store, reminders);
     const web = new WebWrites(store, reminders);
     const facade = new ServiceFacade(store, operations, 'admin', 'test', undefined, undefined, undefined, undefined, undefined, undefined, web);
     const update = await facade.management('web.reminders.update', { idempotencyKey: '7632737c-ea5e-45bd-a8aa-a0179f84b950', change: { kind: 'reminders.update', containerId: 'test-list', id: 'r-1', title: 'Updated', body: '', completed: true } });
@@ -172,7 +270,7 @@ test('management routes reminder update and delete requests to Web writes', asyn
 
 test('management rejects legacy Notes Web endpoints before a reader or audit event', async () => {
   const store = new Store(':memory:');
-  const reminderOps = new ReminderOperations(store, { preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true });
+  const reminderOps = new AgentOperations(store, { preflight: async () => {}, create: async () => ({ id: 'unused', containerId: 'unused' }), verify: async () => true });
   const facade = new ServiceFacade(store, reminderOps, 'admin', 'test', undefined,
     { search: async (folderId: string, query: string) => [{ id: 'note', folderId, title: 'private', snippet: query }], get: async () => ({ id: 'note', folderId: 'folder', title: 'private', snippet: '', body: 'private body' }) } as never,
     { list: async (listId: string) => ({ items: [{ id: 'r', listId, title: 'private', body: '', completed: false, due: null }], nextOffset: null }) } as never,
@@ -240,21 +338,54 @@ test('v1 databases migrate operations to an explicit reminders provider', () => 
     const store = new Store(path);
     try {
       assert.equal(store.operationProvider('op'), 'reminders');
-      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 4);
+      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
     } finally { store.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('onboarding status retains only profile metadata and expires without a credential', () => {
+test('v6 databases drop transient onboarding state', () => {
+  const root = mkdtempSync(join(tmpdir(), 'apple-connector-v6-'));
+  const path = join(root, 'connector.sqlite');
+  try {
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`CREATE TABLE onboarding (id TEXT PRIMARY KEY, state TEXT NOT NULL, expires_at INTEGER NOT NULL,
+      client_id TEXT, credential_file TEXT, failure_code TEXT, created_at INTEGER NOT NULL);
+      PRAGMA user_version=6;`);
+    legacy.close();
+    const store = new Store(path);
+    try {
+      assert.equal((store.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 8);
+      assert.equal(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='onboarding'").get(), undefined);
+    } finally { store.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('audit events capture the authorization name and survive deletion', () => {
   const store = new Store(':memory:');
-  const pending = store.createOnboarding(Date.now() + 60_000);
-  assert.deepEqual(store.onboarding(pending.id), { id: pending.id, state: 'pending', expiresAt: pending.expiresAt });
-  const created = store.createClient({ name: 'Agent', grants: [] });
-  store.completeOnboarding(pending.id, created.client.id, '/private/profile.token');
-  const configured = store.onboarding(pending.id);
-  assert.equal(configured.state, 'configured');
-  assert.equal(configured.clientId, created.client.id);
-  assert.equal(configured.credentialFile, '/private/profile.token');
-  assert.equal(JSON.stringify(configured).includes(created.token), false);
-  store.close();
+  try {
+    const { client } = store.createClient({ name: 'Research Agent', grants: [] });
+    store.audit({ at: 2, clientId: client.id, provider: 'calendar', action: 'read', outcome: 'allowed', count: 1, target: 'work' });
+    assert.ok(store.auditEvents().every((event) => event.clientName === 'Research Agent'));
+    store.deleteClient(client.id);
+    const deleted = store.auditEvents().find((event) => event.action === 'client_deleted');
+    assert.equal(deleted?.clientName, 'Research Agent');
+  } finally { store.close(); }
+});
+
+test('deleting a lane removes only that lane history and keeps everything else', () => {
+  const store = new Store(':memory:');
+  try {
+    const first = store.createClient({ name: 'First', grants: [] }).client;
+    const second = store.createClient({ name: 'Second', grants: [] }).client;
+    store.audit({ at: 3, clientId: first.id, provider: 'calendar', action: 'create', outcome: 'succeeded', count: 1, target: 'work' });
+    store.audit({ at: 4, clientId: second.id, provider: 'reminders', action: 'delete', outcome: 'succeeded', count: 1, target: 'inbox' });
+    store.audit({ at: 5, source: 'web', provider: 'calendar', action: 'read', outcome: 'succeeded', count: 2, target: 'work' });
+    const deleted = store.deleteAuditLane({ kind: 'client', clientId: first.id });
+    assert.ok(deleted.deleted >= 1);
+    assert.equal(store.auditEvents().some((event) => event.clientId === first.id), false);
+    assert.equal(store.auditEvents().filter((event) => event.clientId === second.id).length, 2);
+    assert.equal(store.auditEvents().filter((event) => event.source === 'web').length, 1);
+    assert.equal(store.deleteAuditLane({ kind: 'web' }).deleted, 1);
+    assert.equal(store.auditEvents().filter((event) => event.source === 'web').length, 0);
+  } finally { store.close(); }
 });

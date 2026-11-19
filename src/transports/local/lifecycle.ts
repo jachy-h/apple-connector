@@ -1,19 +1,24 @@
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { request } from 'node:http';
+import { createConnection } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { appVersion } from '../../application/version.js';
 import { Store } from '../../storage/database.js';
 import { ConnectorError } from '../../application/errors.js';
-import { loadOrCreateAdminToken, readAdminToken, statePaths } from './paths.js';
+import { ensureStateDir, loadOrCreateAdminToken, migrateLegacyStateSync, readAdminToken, statePaths } from './paths.js';
+import { helperAppPath, helperExecutablePath } from '../../native/paths.js';
+import { HELPER_PROTOCOL_VERSION } from '../../native/helper-client.js';
 import { HttpServiceClient } from './client.js';
 import type { StatePaths } from './paths.js';
 
 export interface SetupResult { paths: StatePaths; adminToken?: string; adminTokenCreated: boolean; version: string }
+export interface HelperStatus { running: boolean; pid: number | null; socket: string }
 export interface StatusResult {
   running: boolean; pid: number | null; version: string; paths: StatePaths;
   dbBytes: number | null; clients: number; operations: number; adminTokenFileExists: boolean; managementAddress: string | null;
+  helper: HelperStatus;
 }
 export interface StartResult { started: boolean; pid: number }
 export interface ManagementResult { url: string; expiresAt: number; remainingSeconds: number; started: boolean }
@@ -21,6 +26,7 @@ export interface HealthResult { healthy: boolean; reason?: string | undefined }
 
 /** Initialise the state directory, admin session and schema (idempotent). */
 export function setup(): SetupResult {
+  migrateLegacyStateSync();
   const paths = statePaths();
   const adminTokenCreated = !existsSync(paths.adminTokenFile);
   const adminToken = loadOrCreateAdminToken(paths);
@@ -56,7 +62,9 @@ export function status(): StatusResult {
       store.close();
     } catch { /* A running service owns the DB; status still reports paths. */ }
   }
-  return { running, pid, version: appVersion, paths, dbBytes, clients, operations, adminTokenFileExists: existsSync(paths.adminTokenFile), managementAddress };
+  const helperPid = livePid(paths.helperPidFile);
+  const helper: HelperStatus = { running: helperPid !== null && existsSync(paths.helperSocket), pid: helperPid, socket: paths.helperSocket };
+  return { running, pid, version: appVersion, paths, dbBytes, clients, operations, adminTokenFileExists: existsSync(paths.adminTokenFile), managementAddress, helper };
 }
 
 /** Proves that the claimed local service can answer an authenticated management RPC. */
@@ -81,15 +89,119 @@ function livePid(file: string): number | null {
   } catch { return null; }
 }
 
-async function issueManagementUrl(onboardingId?: string): Promise<ManagementResult> {
+/** Ask the helper socket for its handshake without keeping a connection open. */
+async function probeHelper(socketPath: string, timeoutMs = 1_000): Promise<{ helperVersion?: string } | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = '';
+    let timer: NodeJS.Timeout | undefined;
+    const socket = createConnection(socketPath);
+    const finish = (value: { helperVersion?: string } | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      socket.destroy();
+      resolve(value);
+    };
+    timer = setTimeout(() => finish(null), timeoutMs);
+    socket.setEncoding('utf8');
+    socket.once('connect', () => socket.write(`${JSON.stringify({ version: HELPER_PROTOCOL_VERSION, id: 'lifecycle', action: 'hello', payload: {} })}\n`));
+    socket.on('data', (chunk: string) => {
+      buffer += chunk;
+      const index = buffer.indexOf('\n');
+      if (index < 0) return;
+      try {
+        const reply = JSON.parse(buffer.slice(0, index)) as { ok?: boolean; result?: { helperVersion?: unknown; protocolVersion?: unknown } };
+        if (reply.ok && reply.result?.protocolVersion === HELPER_PROTOCOL_VERSION && typeof reply.result.helperVersion === 'string') finish({ helperVersion: reply.result.helperVersion });
+        else finish(null);
+      } catch { finish(null); }
+    });
+    socket.once('error', () => finish(null));
+    socket.once('close', () => finish(null));
+  });
+}
+
+/** Return a live helper pid only when the process still looks like our helper. */
+function helperPidIfLive(paths: StatePaths): number | null {
+  const pid = livePid(paths.helperPidFile);
+  if (pid === null) return null;
+  try {
+    const command = execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
+    return command.includes('apple-connector-helper') ? pid : null;
+  } catch { return null; }
+}
+
+function launchDirectHelper(paths: StatePaths): void {
+  const helper = helperExecutablePath();
+  if (!existsSync(helper)) throw new ConnectorError('service_unavailable', `EventKit helper is missing at ${helper}. Run \`npm run build\` before starting the connector.`);
+  const child = spawn(helper, ['--socket', paths.helperSocket], { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
+function launchAppHelper(paths: StatePaths): void {
+  const app = helperAppPath();
+  if (!existsSync(app)) throw new ConnectorError('service_unavailable', `Apple Connector helper App is missing at ${app}. Run \`npm run build\` or reinstall the package.`);
+  const result = spawnSync('/usr/bin/open', ['-n', app, '--args', '--socket', paths.helperSocket], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    const detail = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
+    throw new ConnectorError('service_unavailable', `Could not launch Apple Connector.app${detail ? `: ${detail}` : '.'} Allow it in System Settings → Privacy & Security if macOS blocked it.`);
+  }
+}
+
+/** Start the permission-owning helper App (or a direct helper for tests) and wait for its socket. */
+export async function ensureHelperSocket(paths: StatePaths = statePaths()): Promise<void> {
+  const direct = process.platform !== 'darwin' || process.env.APPLE_CONNECTOR_HELPER_MODE === 'direct';
+  const current = await probeHelper(paths.helperSocket, 2_000);
+  if (current && (direct || current.helperVersion === appVersion)) return;
+  const live = helperPidIfLive(paths);
+  // The helper may be busy with a long EventKit request. Do not kill a live process
+  // just because the handshake missed its deadline; wait briefly, then leave it alone.
+  if (!current && live !== null) {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const ready = await probeHelper(paths.helperSocket, 500);
+      if (ready) return;
+      await sleep(100);
+    }
+    return;
+  }
+  if (current || live !== null) await stopHelper(paths);
+  ensureStateDir(paths);
+  for (const file of [paths.helperSocket, paths.helperPidFile]) { try { rmSync(file, { force: true }); } catch { /* Best effort. */ } }
+  if (direct) launchDirectHelper(paths);
+  else launchAppHelper(paths);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const ready = await probeHelper(paths.helperSocket, 500);
+    if (ready) return;
+    await sleep(100);
+  }
+  let tail = '';
+  try { tail = readFileSync(paths.helperLogFile, 'utf8').split('\n').slice(-8).join('\n'); } catch { /* No helper log. */ }
+  throw new ConnectorError('service_unavailable', `Apple Connector helper did not become ready.\n${tail}`.trim());
+}
+
+/** Stop the helper App and remove its socket and pid file. */
+export async function stopHelper(paths: StatePaths = statePaths()): Promise<void> {
+  const pid = helperPidIfLive(paths);
+  if (pid !== null) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* Already gone. */ }
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (livePid(paths.helperPidFile) === null) break;
+      await sleep(50);
+    }
+    const remaining = helperPidIfLive(paths);
+    if (remaining !== null) { try { process.kill(remaining, 'SIGKILL'); } catch { /* Best effort. */ } }
+  }
+  for (const file of [paths.helperSocket, paths.helperPidFile]) { try { rmSync(file, { force: true }); } catch { /* Best effort. */ } }
+}
+
+async function issueManagementUrl(): Promise<ManagementResult> {
   const paths = statePaths();
   const rawUrl = readFileSync(paths.adminUrlFile, 'utf8').trim();
   let url: string;
   try { const parsed = new URL(rawUrl); if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') throw new Error(); url = parsed.origin; }
   catch { throw new ConnectorError('service_unavailable', 'Management web URL is invalid.'); }
   return new Promise((resolveIssue, rejectIssue) => {
-    const controlUrl = onboardingId ? `${url}/control/issue?onboardingId=${encodeURIComponent(onboardingId)}` : `${url}/control/issue`;
-    const req = request(controlUrl, { method: 'POST', headers: { authorization: `Bearer ${readAdminToken(paths)}` }, timeout: 5_000 }, (res) => {
+    const req = request(`${url}/control/issue`, { method: 'POST', headers: { authorization: `Bearer ${readAdminToken(paths)}` }, timeout: 5_000 }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
       res.on('end', () => {
@@ -107,12 +219,12 @@ async function issueManagementUrl(onboardingId?: string): Promise<ManagementResu
 }
 
 /** Start or reuse an isolated, fixed-TTL management web process. */
-export async function openManagementWeb(onboardingId?: string): Promise<ManagementResult> {
+export async function openManagementWeb(): Promise<ManagementResult> {
   const paths = statePaths();
   await startService();
   const expiresAt = (() => { try { return Number.parseInt(readFileSync(paths.webExpiresAtFile, 'utf8').trim(), 10); } catch { return 0; } })();
   if (livePid(paths.webPidFile) && expiresAt > Date.now()) {
-    try { return await issueManagementUrl(onboardingId); } catch { /* replace a broken web process */ }
+    try { return await issueManagementUrl(); } catch { /* replace a broken web process */ }
   }
   for (const file of [paths.webPidFile, paths.adminUrlFile, paths.webExpiresAtFile]) try { rmSync(file, { force: true }); } catch { /* best effort */ }
   const entry = fileURLToPath(new URL('../admin/main.js', import.meta.url));
@@ -121,30 +233,18 @@ export async function openManagementWeb(onboardingId?: string): Promise<Manageme
   child.unref();
   for (let attempt = 0; attempt < 100; attempt++) {
     if (livePid(paths.webPidFile)) {
-      try { const issued = await issueManagementUrl(onboardingId); return { ...issued, started: true }; } catch { /* wait */ }
+      try { const issued = await issueManagementUrl(); return { ...issued, started: true }; } catch { /* wait */ }
     }
     await sleep(50);
   }
   throw new ConnectorError('service_unavailable', 'Management web did not become ready.');
 }
 
-export async function createOnboarding(expiresAt = Date.now() + 60 * 60_000): Promise<{ onboardingId: string; expiresAt: number }> {
-  const paths = statePaths();
-  await startService();
-  const created = await new HttpServiceClient(paths.socket).request('onboarding.create', { expiresAt }, readAdminToken(paths)) as { id: string; expiresAt: number };
-  return { onboardingId: created.id, expiresAt: created.expiresAt };
-}
-
-export async function onboardingStatus(id: string): Promise<unknown> {
-  const paths = statePaths();
-  await startService();
-  return new HttpServiceClient(paths.socket).request('onboarding.status', { id }, readAdminToken(paths));
-}
-
 /** Start or reuse the detached service, then prove both RPC and management site readiness. */
 export async function startService(): Promise<StartResult> {
   const paths = statePaths();
   setup();
+  await ensureHelperSocket(paths);
   const existing = status();
   if (existing.running && existing.pid !== null) {
     try {
@@ -154,9 +254,10 @@ export async function startService(): Promise<StartResult> {
       }
     } catch { /* An incompatible running service must be replaced by this build. */ }
     await stopService();
+    await ensureHelperSocket(paths);
   }
   const entry = fileURLToPath(new URL('./main.js', import.meta.url));
-  const child = spawn(process.execPath, [entry], { detached: true, stdio: 'ignore' });
+  const child = spawn(process.execPath, [entry], { detached: true, stdio: 'ignore', env: { ...process.env, APPLE_CONNECTOR_HELPER_SOCKET: paths.helperSocket } });
   child.unref();
   for (let attempt = 0; attempt < 100; attempt++) {
     if (!existsSync(paths.socket)) { await sleep(100); continue; }
@@ -178,6 +279,9 @@ export async function startForegroundService(): Promise<StartResult> {
   setup();
   const existing = status();
   if (existing.running) await stopService();
+  const paths = statePaths();
+  await ensureHelperSocket(paths);
+  process.env.APPLE_CONNECTOR_HELPER_SOCKET = paths.helperSocket;
   // main owns the listeners and SIGINT/SIGTERM shutdown path. Dynamic import keeps the
   // development CLI itself as the service process instead of spawning or detaching a child.
   await import('./main.js');
@@ -186,17 +290,22 @@ export async function startForegroundService(): Promise<StartResult> {
   return { started: true, pid: process.pid };
 }
 
-/** Stop the background service and wait for its socket to disappear. */
+/** Stop the background service and the permission-owning helper, then wait for their sockets to disappear. */
 export async function stopService(): Promise<void> {
   const paths = statePaths();
   const current = status();
-  if (!current.running || current.pid === null) throw new ConnectorError('conflict', 'Service is not running.');
-  try { process.kill(current.pid, 'SIGTERM'); } catch { throw new ConnectorError('service_unavailable', 'Cannot signal the service process.'); }
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (!existsSync(paths.socket)) return;
-    await sleep(100);
+  const helper = current.helper;
+  if ((!current.running || current.pid === null) && !helper.running) throw new ConnectorError('conflict', 'Service is not running.');
+  let stopped = !current.running || current.pid === null;
+  if (!stopped && current.pid !== null) {
+    try { process.kill(current.pid, 'SIGTERM'); } catch { throw new ConnectorError('service_unavailable', 'Cannot signal the service process.'); }
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (!existsSync(paths.socket)) { stopped = true; break; }
+      await sleep(100);
+    }
   }
-  throw new ConnectorError('service_unavailable', 'Service did not stop within the timeout; check the process and state directory.');
+  await stopHelper(paths);
+  if (!stopped && existsSync(paths.socket)) throw new ConnectorError('service_unavailable', 'Service did not stop within the timeout; check the process and state directory.');
 }
 
 /** Read the memory-only bootstrap URL created by the currently running local service. */

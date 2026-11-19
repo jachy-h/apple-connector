@@ -37,7 +37,6 @@ export const scriptRegistry = {
   'diagnostics.notesDeleteProbe': { path: 'diagnostics/notes-delete.js', mutates: true, timeoutMs: 60_000 },
   'reminders.listLists': { path: 'reminders/read.js', mutates: false, timeoutMs: 60_000 },
   'reminders.list': { path: 'reminders/read.js', mutates: false, timeoutMs: 60_000 },
-  'reminders.listEventKit': { path: 'reminders/eventkit-read.js', mutates: false, timeoutMs: 25_000 },
   'diagnostics.remindersDeleteProbe': { path: 'diagnostics/reminders-delete.js', mutates: true, timeoutMs: 60_000 },
   'diagnostics.remindersDeleteM0ProbeByUuid': { path: 'diagnostics/reminders-delete-m0-probe.js', mutates: true, timeoutMs: 60_000 },
   'calendar.listCalendars': { path: 'calendar/read.js', mutates: false, timeoutMs: 60_000 },

@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -14,16 +14,34 @@ export interface StatePaths {
   adminUrlFile: string;
   webPidFile: string;
   webExpiresAtFile: string;
+  helperSocket: string;
+  helperPidFile: string;
+  helperLogFile: string;
   logFile: string;
 }
 
-const TOKEN_BYTES = 32;
+export interface StateMigration {
+  migrated: boolean;
+  from: string;
+  to: string;
+  stoppedService: boolean;
+  stoppedWeb: boolean;
+}
 
-/** State (including the audit SQLite database) lives under a dedicated user directory; tests may override it. */
-export function statePaths(): StatePaths {
-  const base = process.env.APPLE_CONNECTOR_STATE_DIR
-    ? resolve(process.env.APPLE_CONNECTOR_STATE_DIR)
-    : join(homedir(), 'apple-connector');
+const TOKEN_BYTES = 32;
+const LEGACY_STATE_DIR_NAME = 'apple-connector';
+const STATE_DIR_NAME = '.apple-connector';
+const RUNTIME_FILES = ['service.sock', 'service.pid', 'service.lock', 'admin-url', 'web.pid', 'web-expires-at', 'helper.sock', 'helper.pid', 'helper.log'];
+
+export function defaultStateDir(): string {
+  return join(homedir(), STATE_DIR_NAME);
+}
+
+export function legacyStateDir(): string {
+  return join(homedir(), LEGACY_STATE_DIR_NAME);
+}
+
+function statePathsFor(base: string): StatePaths {
   if (['/', process.env.HOME].includes(base)) {
     throw new ConnectorError('invalid_request', 'State directory must be a dedicated directory, not the home directory.');
   }
@@ -37,8 +55,101 @@ export function statePaths(): StatePaths {
     adminUrlFile: join(base, 'admin-url'),
     webPidFile: join(base, 'web.pid'),
     webExpiresAtFile: join(base, 'web-expires-at'),
+    helperSocket: join(base, 'helper.sock'),
+    helperPidFile: join(base, 'helper.pid'),
+    helperLogFile: join(base, 'helper.log'),
     logFile: join(base, 'service.log'),
   };
+}
+
+/** State (including the audit SQLite database) lives under a dedicated user directory; tests may override it. */
+export function statePaths(): StatePaths {
+  const base = process.env.APPLE_CONNECTOR_STATE_DIR
+    ? resolve(process.env.APPLE_CONNECTOR_STATE_DIR)
+    : defaultStateDir();
+  return statePathsFor(base);
+}
+
+function livePid(file: string): number | null {
+  let pid: number;
+  try { pid = Number.parseInt(readFileSync(file, 'utf8').trim(), 10); }
+  catch { return null; }
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try { process.kill(pid, 0); return pid; }
+  catch { return null; }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  return predicate();
+}
+
+/** Move a state directory when no service is using it. Refuses to merge two non-empty directories. */
+export function migrateStateDirectory(from: string, to: string, options: { allowStaleRuntime?: boolean } = {}): StateMigration {
+  const result: StateMigration = { migrated: false, from, to, stoppedService: false, stoppedWeb: false };
+  if (!existsSync(from)) return result;
+  if (existsSync(to)) {
+    let entries: string[];
+    try { entries = readdirSync(to); }
+    catch { throw new ConnectorError('service_unavailable', 'Cannot inspect the new state directory.'); }
+    if (entries.length) throw new ConnectorError('conflict', `Both state directories exist; refusing to merge them: ${from} and ${to}`);
+    rmdirSync(to);
+  }
+  const pid = livePid(join(from, 'service.pid'));
+  if (pid !== null) {
+    throw new ConnectorError('service_unavailable', `The legacy service is still running (pid ${pid}). Run \`apple-connector migrate-state\` to stop it and migrate.`);
+  }
+  if (!options.allowStaleRuntime && existsSync(join(from, 'service.sock'))) {
+    throw new ConnectorError('service_unavailable', 'The legacy service socket still exists. Stop the legacy service before migrating.');
+  }
+  // Runtime files cannot be reused across the rename; they are recreated by the new service.
+  for (const file of RUNTIME_FILES) {
+    try { rmSync(join(from, file), { force: true }); } catch { /* Best effort. */ }
+  }
+  renameSync(from, to);
+  chmodSync(to, 0o700);
+  return { ...result, migrated: true };
+}
+
+/** Automatic migration path: only runs when no legacy service owns the directory. */
+export function migrateLegacyStateSync(): StateMigration {
+  if (process.env.APPLE_CONNECTOR_STATE_DIR) {
+    return { migrated: false, from: legacyStateDir(), to: defaultStateDir(), stoppedService: false, stoppedWeb: false };
+  }
+  return migrateStateDirectory(legacyStateDir(), defaultStateDir());
+}
+
+/** Explicit migration path: gracefully stop the legacy service and web process, then move the directory. */
+export async function migrateStateDirectoryWithStop(from: string, to: string): Promise<StateMigration> {
+  const result: StateMigration = { migrated: false, from, to, stoppedService: false, stoppedWeb: false };
+  if (!existsSync(from)) return result;
+  const servicePid = livePid(join(from, 'service.pid'));
+  if (servicePid !== null) {
+    try { process.kill(servicePid, 'SIGTERM'); }
+    catch { throw new ConnectorError('service_unavailable', `Cannot signal the legacy service (pid ${servicePid}).`); }
+    result.stoppedService = true;
+    const stopped = await waitFor(() => livePid(join(from, 'service.pid')) === null, 10_000);
+    if (!stopped) throw new ConnectorError('service_unavailable', 'The legacy service did not stop within 10 seconds; nothing was moved.');
+  }
+  const webPid = livePid(join(from, 'web.pid'));
+  if (webPid !== null) {
+    try { process.kill(webPid, 'SIGTERM'); result.stoppedWeb = true; } catch { /* Best effort. */ }
+    await waitFor(() => livePid(join(from, 'web.pid')) === null, 2_000);
+  }
+  const migrated = migrateStateDirectory(from, to, { allowStaleRuntime: true });
+  return { ...migrated, stoppedService: result.stoppedService, stoppedWeb: result.stoppedWeb };
+}
+
+/** Explicit migration path for the default home directories. */
+export async function migrateLegacyStateWithStop(): Promise<StateMigration> {
+  if (process.env.APPLE_CONNECTOR_STATE_DIR) {
+    throw new ConnectorError('invalid_request', 'Cannot migrate while APPLE_CONNECTOR_STATE_DIR is set.');
+  }
+  return migrateStateDirectoryWithStop(legacyStateDir(), defaultStateDir());
 }
 
 export function ensureStateDir(paths: StatePaths): void {
@@ -48,7 +159,7 @@ export function ensureStateDir(paths: StatePaths): void {
 
 export function readAdminToken(paths: StatePaths): string {
   if (!existsSync(paths.adminTokenFile)) {
-    throw new ConnectorError('service_unavailable', 'Run `apple-connector setup` first.');
+    throw new ConnectorError('service_unavailable', 'Run `apple-connector start` first.');
   }
   // Matches the legacy format and current 0600-protected file.
   return readFileSync(paths.adminTokenFile, 'utf8').trim();
@@ -68,6 +179,23 @@ export function writeClientToken(file: string, token: string): void {
   if (!token || /\s/.test(token)) throw new ConnectorError('invalid_request', 'Client credential is invalid.');
   writeFileSync(file, `${token}\n`, { mode: 0o600, flag: 'wx' });
   chmodSync(file, 0o600);
+}
+
+const CLIENT_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Resolve an agent-facing authorization key to its owner-only token file under `profiles/`. */
+export function clientTokenFile(paths: StatePaths, key: string): string {
+  if (!CLIENT_KEY_PATTERN.test(key)) throw new ConnectorError('invalid_request', 'Authorization key is invalid.');
+  return join(paths.dir, 'profiles', `${key}.token`);
+}
+
+/** Read an agent credential by key without returning the resolved file path to the caller. */
+export function readClientTokenByKey(paths: StatePaths, key: string): string {
+  const file = clientTokenFile(paths, key);
+  if (!existsSync(file)) {
+    throw new ConnectorError('invalid_request', 'Unknown authorization key. Run `apple-connector open` to create or recover an authorization.');
+  }
+  return readClientToken(file);
 }
 
 /** Read only a regular, owner-private credential file. */

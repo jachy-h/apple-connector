@@ -22,7 +22,7 @@ export class Store {
     if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA auto_vacuum=INCREMENTAL; PRAGMA journal_mode=WAL;');
     const row = this.db.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (row.user_version > 4) {
+    if (row.user_version > 8) {
       this.db.close();
       throw new ConnectorError('service_unavailable', 'Database was created by a newer version.');
     }
@@ -54,36 +54,44 @@ export class Store {
       CREATE INDEX onboarding_expires_at ON onboarding(expires_at);
       PRAGMA user_version=4;
     `));
-  }
-
-  createOnboarding(expiresAt: number): { id: string; expiresAt: number; state: 'pending' } {
-    if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) throw new ConnectorError('invalid_request', 'Onboarding expiry must be in the future.');
-    const id = randomUUID();
-    this.transaction(() => this.db.prepare('INSERT INTO onboarding(id,state,expires_at,created_at) VALUES(?,?,?,?)').run(id, 'pending', expiresAt, Date.now()));
-    return { id, expiresAt, state: 'pending' };
-  }
-
-  onboarding(id: string): { id: string; state: 'pending' | 'configured' | 'expired' | 'failed'; expiresAt: number; clientId?: string; credentialFile?: string; failureCode?: string } {
-    const row = this.db.prepare('SELECT id,state,expires_at,client_id,credential_file,failure_code FROM onboarding WHERE id=?').get(id) as { id: string; state: string; expires_at: number; client_id: string | null; credential_file: string | null; failure_code: string | null } | undefined;
-    if (!row) throw new ConnectorError('invalid_request', 'Unknown onboarding ID.');
-    if (row.state === 'pending' && row.expires_at <= Date.now()) {
-      this.db.prepare("UPDATE onboarding SET state='expired' WHERE id=? AND state='pending'").run(id);
-      return { id: row.id, state: 'expired', expiresAt: row.expires_at };
-    }
-    if (!['pending', 'configured', 'expired', 'failed'].includes(row.state)) throw new ConnectorError('service_unavailable', 'Invalid onboarding state.');
-    return { id: row.id, state: row.state as 'pending' | 'configured' | 'expired' | 'failed', expiresAt: row.expires_at,
-      ...(row.client_id ? { clientId: row.client_id } : {}), ...(row.credential_file ? { credentialFile: row.credential_file } : {}), ...(row.failure_code ? { failureCode: row.failure_code } : {}) };
-  }
-
-  completeOnboarding(id: string, clientId: string, credentialFile: string): void {
-    const current = this.onboarding(id);
-    if (current.state === 'configured') {
-      if (current.clientId === clientId && current.credentialFile === credentialFile) return;
-      throw new ConnectorError('conflict', 'This onboarding has already configured a profile.');
-    }
-    if (current.state !== 'pending') throw new ConnectorError('conflict', `This onboarding is ${current.state}.`);
-    this.client(clientId);
-    this.transaction(() => this.db.prepare("UPDATE onboarding SET state='configured',client_id=?,credential_file=? WHERE id=? AND state='pending'").run(clientId, credentialFile, id));
+    if (row.user_version <= 4) this.transaction(() => this.db.exec(`
+      ALTER TABLE clients ADD COLUMN last_used_at INTEGER;
+      PRAGMA user_version=5;
+    `));
+    if (row.user_version <= 5) this.transaction(() => {
+      // Approval was removed in v0.14.0. Pending plans can no longer be approved; never
+      // execute an intent that was left between prepare and commit during the upgrade.
+      if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='operations'").get()) {
+        this.db.prepare("UPDATE operations SET state='cancelled',payload=NULL WHERE state IN ('prepared','approved')").run();
+      }
+      const clients = this.db.prepare('SELECT id,grants FROM clients').all() as Array<{ id: string; grants: string }>;
+      const update = this.db.prepare('UPDATE clients SET grants=? WHERE id=?');
+      for (const client of clients) {
+        let grants: unknown;
+        try { grants = JSON.parse(client.grants); }
+        catch { throw new ConnectorError('service_unavailable', 'Existing client grants are invalid JSON.'); }
+        if (!Array.isArray(grants)) throw new ConnectorError('service_unavailable', 'Existing client grants are invalid.');
+        const stripped = grants.map((grant) => {
+          if (!grant || typeof grant !== 'object' || Array.isArray(grant)) return grant;
+          const { approval: _approval, ...rest } = grant as Record<string, unknown>;
+          return rest;
+        });
+        update.run(JSON.stringify(stripped), client.id);
+      }
+      this.db.exec('PRAGMA user_version=6');
+    });
+    if (row.user_version <= 6) this.transaction(() => this.db.exec(`
+      DROP TABLE IF EXISTS onboarding;
+      PRAGMA user_version=7;
+    `));
+    if (row.user_version <= 7) this.transaction(() => {
+      // Synthetic or partially initialised databases may not have clients yet; adding the
+      // binding columns must not turn an older file into an unopenable one.
+      if (this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='clients'").get()) {
+        this.db.exec('ALTER TABLE clients ADD COLUMN agent_name TEXT; ALTER TABLE clients ADD COLUMN verified_at INTEGER;');
+      }
+      this.db.exec('PRAGMA user_version=8');
+    });
   }
 
   transaction<T>(work: () => T): T {
@@ -104,51 +112,36 @@ export class Store {
     return { client: this.client(id), token };
   }
 
-  updateClient(id: string, input: unknown): Client {
-    const current = this.client(id);
-    if (current.revoked) throw new ConnectorError('conflict', 'Revoked clients cannot be edited.');
-    const parsed = clientInputSchema.parse(input);
-    this.transaction(() => {
-      this.db.prepare('UPDATE clients SET name=?,grants=?,policy_version=policy_version+1 WHERE id=? AND revoked=0')
-        .run(parsed.name, JSON.stringify(parsed.grants), id);
-      // Every policy change invalidates executable plans; the next prepare binds the new version.
-      this.db.prepare("UPDATE operations SET state='cancelled',payload=NULL WHERE client_id=? AND state IN ('prepared','approved')").run(id);
-      this.audit({ at: Date.now(), clientId: id, action: 'client_updated', outcome: 'allowed', count: 0 });
-    });
-    return this.client(id);
-  }
-
-  rotateClientToken(id: string): { client: Client; token: string } {
-    const current = this.client(id);
-    if (current.revoked) throw new ConnectorError('conflict', 'Revoked clients cannot rotate credentials.');
-    const token = randomBytes(32).toString('base64url');
-    this.transaction(() => {
-      this.db.prepare('UPDATE clients SET token_hash=? WHERE id=? AND revoked=0').run(digest(token), id);
-      this.audit({ at: Date.now(), clientId: id, action: 'client_token_rotated', outcome: 'allowed', count: 0 });
-    });
-    return { client: this.client(id), token };
-  }
-
-  authenticate(token: string): Client {
+  authenticate(token: string, now = Date.now()): Client {
     if (typeof token !== 'string' || token.length < 32 || token.length > 128) {
       throw new ConnectorError('permission_denied', 'Invalid client credentials.');
     }
     const row = this.db.prepare('SELECT id FROM clients WHERE token_hash=? AND revoked=0').get(digest(token)) as { id: string } | undefined;
     if (!row) throw new ConnectorError('permission_denied', 'Invalid client credentials.');
+    // Keep the display value fresh without turning every agent request into a write transaction.
+    this.db.prepare('UPDATE clients SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at < ?)')
+      .run(now, row.id, now - 60_000);
     return this.client(row.id);
   }
 
   client(id: string): Client {
-    const row = this.db.prepare('SELECT id,name,grants,policy_version,revoked FROM clients WHERE id=?').get(id) as
-      { id: string; name: string; grants: string; policy_version: number; revoked: number } | undefined;
+    const row = this.db.prepare('SELECT id,name,grants,policy_version,revoked,last_used_at,agent_name,verified_at FROM clients WHERE id=?').get(id) as
+      { id: string; name: string; grants: string; policy_version: number; revoked: number; last_used_at: number | null; agent_name: string | null; verified_at: number | null } | undefined;
     if (!row) throw new ConnectorError('permission_denied', 'Unknown client.');
-    return { id: row.id, name: row.name, grants: JSON.parse(row.grants), policyVersion: row.policy_version, revoked: Boolean(row.revoked) };
+    return { id: row.id, name: row.name, grants: JSON.parse(row.grants), policyVersion: row.policy_version, revoked: Boolean(row.revoked), lastUsedAt: row.last_used_at, agentName: row.agent_name, verifiedAt: row.verified_at };
   }
 
   listClients(): Client[] {
-    return (this.db.prepare('SELECT id,name,grants,policy_version,revoked FROM clients ORDER BY id').all() as Array<{
-      id: string; name: string; grants: string; policy_version: number; revoked: number; }>)
-      .map((row) => ({ id: row.id, name: row.name, grants: JSON.parse(row.grants) as Client['grants'], policyVersion: row.policy_version, revoked: Boolean(row.revoked) }));
+    return (this.db.prepare('SELECT id,name,grants,policy_version,revoked,last_used_at,agent_name,verified_at FROM clients ORDER BY id').all() as Array<{
+      id: string; name: string; grants: string; policy_version: number; revoked: number; last_used_at: number | null; agent_name: string | null; verified_at: number | null; }>)
+      .map((row) => ({ id: row.id, name: row.name, grants: JSON.parse(row.grants) as Client['grants'], policyVersion: row.policy_version, revoked: Boolean(row.revoked), lastUsedAt: row.last_used_at, agentName: row.agent_name, verifiedAt: row.verified_at }));
+  }
+
+  /** Record which Agent completed verification for this authorization. Latest verification wins. */
+  verifyClient(id: string, agentName: string, now = Date.now()): Client {
+    const changed = this.db.prepare('UPDATE clients SET agent_name=?, verified_at=? WHERE id=? AND revoked=0').run(agentName, now, id);
+    if (Number(changed.changes) === 0) throw new ConnectorError('permission_denied', 'Unknown client.');
+    return this.client(id);
   }
 
   /** Operation metadata for the admin surface. Staged payload may contain private content and is never returned here. */
@@ -186,40 +179,49 @@ export class Store {
     return row.provider;
   }
 
-  /** Content is available only while a plan is executable and only to the trusted management session. */
-  operationPreview(id: string): { id: string; clientId: string; provider: string; state: string; expiresAt: number; change: unknown } {
-    const row = this.db.prepare('SELECT id,client_id,provider,state,expires_at,payload FROM operations WHERE id=?').get(id) as { id: string; client_id: string; provider: string; state: string; expires_at: number; payload: string | null } | undefined;
-    if (!row) throw new ConnectorError('permission_denied', 'Unknown operation.');
-    if (!['prepared', 'approved'].includes(row.state) || !row.payload) throw new ConnectorError('conflict', 'The plan content is no longer available for preview.');
-    let change: unknown;
-    try { change = JSON.parse(row.payload); } catch { throw new ConnectorError('service_unavailable', 'Stored plan content is invalid.'); }
-    return { id: row.id, clientId: row.client_id, provider: row.provider, state: row.state, expiresAt: row.expires_at, change };
-  }
-
-  revoke(id: string): void {
+  /** Permanently remove an authorization; audit events remain as immutable history. */
+  deleteClient(id: string): { id: string } {
     this.transaction(() => {
-      this.client(id);
-      this.db.prepare('UPDATE clients SET revoked=1, policy_version=policy_version+1 WHERE id=?').run(id);
-      this.db.prepare("UPDATE operations SET state='cancelled',payload=NULL WHERE client_id=? AND state IN ('prepared','approved')").run(id);
-      this.audit({ at: Date.now(), clientId: id, action: 'client_revoked', outcome: 'allowed', count: 0 });
+      const name = this.client(id).name;
+      const unresolved = this.db.prepare("SELECT COUNT(*) AS count FROM operations WHERE client_id=? AND state='executing'").get(id) as { count: number };
+      if (unresolved.count > 0) throw new ConnectorError('conflict', 'A write is still executing for this client; wait for it to finish before deleting.');
+      this.db.prepare('DELETE FROM operations WHERE client_id=?').run(id);
+      this.db.prepare('DELETE FROM clients WHERE id=?').run(id);
+      this.audit({ at: Date.now(), clientId: id, clientName: name, action: 'client_deleted', outcome: 'allowed', count: 0 });
     });
-  }
-
-  /** Reject only a not-yet-approved immutable plan; no native call is attempted. */
-  rejectOperation(id: string): void {
-    this.transaction(() => {
-      const operation = this.db.prepare('SELECT client_id,state FROM operations WHERE id=?').get(id) as { client_id: string; state: string } | undefined;
-      if (!operation) throw new ConnectorError('permission_denied', 'Unknown operation.');
-      if (operation.state !== 'prepared') throw new ConnectorError('conflict', `Only prepared operations can be rejected (current state: ${operation.state}).`);
-      this.db.prepare("UPDATE operations SET state='cancelled',payload=NULL WHERE id=? AND state='prepared'").run(id);
-      this.audit({ at: Date.now(), clientId: operation.client_id, operationId: id, action: 'operation_rejected', outcome: 'denied', count: 0 });
-    });
+    return { id };
   }
 
   audit(input: Omit<AuditEvent, 'source'> & { source?: 'client' | 'web' }): void {
-    const event = auditEventSchema.parse(input);
+    // Keep a display name with the event so deleted authorizations remain identifiable
+    // in history. Old rows without it still parse because the field is optional.
+    const named = input.clientName === undefined && input.clientId
+      ? (() => { const name = this.clientName(input.clientId!); return name === undefined ? input : { ...input, clientName: name }; })()
+      : input;
+    const event = auditEventSchema.parse(named);
     const json = JSON.stringify(event);
     this.db.prepare('INSERT INTO audit(at,event,bytes) VALUES(?,?,?)').run(event.at, json, Buffer.byteLength(json));
+  }
+
+  private clientName(id: string): string | undefined {
+    const row = this.db.prepare('SELECT name FROM clients WHERE id=?').get(id) as { name: string } | undefined;
+    return row?.name;
+  }
+
+  /** Delete every audit event for one chart lane. Returns the number of removed rows. */
+  deleteAuditLane(ref: { kind: 'client'; clientId: string } | { kind: 'web' }): { deleted: number } {
+    return this.transaction(() => {
+      const rows = this.db.prepare('SELECT id,event FROM audit').all() as Array<{ id: number; event: string }>;
+      const ids: number[] = [];
+      for (const row of rows) {
+        let event: AuditEvent;
+        try { event = JSON.parse(row.event) as AuditEvent; } catch { continue; }
+        if (ref.kind === 'web' ? event.source === 'web' : event.clientId === ref.clientId) ids.push(row.id);
+      }
+      const remove = this.db.prepare('DELETE FROM audit WHERE id=?');
+      for (const id of ids) remove.run(id);
+      return { deleted: ids.length };
+    });
   }
 
   auditEvents(): AuditEvent[] {
